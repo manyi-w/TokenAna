@@ -1,0 +1,55 @@
+diff --git a/sklearn/model_selection/_split.py b/sklearn/model_selection/_split.py
+index 24394f869..0224624e2 100644
+--- a/sklearn/model_selection/_split.py
++++ b/sklearn/model_selection/_split.py
+@@ -645,29 +645,29 @@ class StratifiedKFold(_BaseKFold):
+                            " be less than n_splits=%d."
+                            % (min_groups, self.n_splits)), Warning)
+ 
+-        # pre-assign each sample to a test fold index using individual KFold
+-        # splitting strategies for each class so as to respect the balance of
+-        # classes
+-        # NOTE: Passing the data corresponding to ith class say X[y==class_i]
+-        # will break when the data is not 100% stratifiable for all classes.
+-        # So we pass np.zeroes(max(c, n_splits)) as data to the KFold
++        # Build an array of sample indices for each class
++        rng = check_random_state(self.random_state) if self.shuffle else None
++        class_indices = []
++        for cls in unique_y:
++            indices = np.where(y == cls)[0]
++            if self.shuffle:
++                indices = indices.copy()
++                rng.shuffle(indices)
++            class_indices.append(indices)
++
++        # For each class, assign test fold indices using KFold on the (possibly shuffled) class indices
+         per_cls_cvs = [
+-            KFold(self.n_splits, shuffle=self.shuffle,
+-                  random_state=rng).split(np.zeros(max(count, self.n_splits)))
+-            for count in y_counts]
++            KFold(self.n_splits, shuffle=False).split(np.zeros(max(count, self.n_splits)))
++            for count in y_counts
++        ]
+ 
+         test_folds = np.zeros(n_samples, dtype=np.int)
+-        for test_fold_indices, per_cls_splits in enumerate(zip(*per_cls_cvs)):
+-            for cls, (_, test_split) in zip(unique_y, per_cls_splits):
+-                cls_test_folds = test_folds[y == cls]
+-                # the test split can be too big because we used
+-                # KFold(...).split(X[:max(c, n_splits)]) when data is not 100%
+-                # stratifiable for all the classes
+-                # (we use a warning instead of raising an exception)
+-                # If this is the case, let's trim it:
+-                test_split = test_split[test_split < len(cls_test_folds)]
+-                cls_test_folds[test_split] = test_fold_indices
+-                test_folds[y == cls] = cls_test_folds
++        for fold_idx, per_cls_splits in enumerate(zip(*per_cls_cvs)):
++            for cls_idx, (_, test_split) in enumerate(per_cls_splits):
++                indices = class_indices[cls_idx]
++                # KFold gives test_split as indices into this class's (possibly shuffled) indices
++                test_split = test_split[test_split < len(indices)]
++                test_folds[indices[test_split]] = fold_idx
+ 
+         return test_folds
+ 
+

@@ -1,0 +1,48 @@
+diff --git a/sphinx/util/inspect.py b/sphinx/util/inspect.py
+index 15f0d66e2..9e6cf4ed5 100644
+--- a/sphinx/util/inspect.py
++++ b/sphinx/util/inspect.py
+@@ -520,15 +520,37 @@ def signature_from_str(signature: str) -> inspect.Signature:
+     args = definition.args
+     params = []
+ 
++    # Handle positional-only and regular parameters together for default assignment
+     if hasattr(args, "posonlyargs"):
+-        for arg in args.posonlyargs:  # type: ignore
+-            annotation = ast_unparse(arg.annotation) or Parameter.empty
+-            params.append(Parameter(arg.arg, Parameter.POSITIONAL_ONLY,
+-                                    annotation=annotation))
++        posonlyargs = args.posonlyargs  # type: ignore
++    else:
++        posonlyargs = []
++    
++    # Combine positional-only and regular arguments
++    all_args = posonlyargs + args.args
++    num_defaults = len(args.defaults)
++    
++    # Process positional-only arguments
++    for i, arg in enumerate(posonlyargs):
++        # Check if this argument has a default value
++        if len(all_args) - i <= num_defaults:
++            default_idx = num_defaults - (len(all_args) - i)
++            default = ast_unparse(args.defaults[default_idx])
++        else:
++            default = Parameter.empty
++        
++        annotation = ast_unparse(arg.annotation) or Parameter.empty
++        params.append(Parameter(arg.arg, Parameter.POSITIONAL_ONLY,
++                                default=default, annotation=annotation))
+ 
++    # Process regular arguments
+     for i, arg in enumerate(args.args):
+-        if len(args.args) - i <= len(args.defaults):
+-            default = ast_unparse(args.defaults[-len(args.args) + i])
++        # Check if this argument has a default value
++        posonly_len = len(posonlyargs)
++        arg_index = posonly_len + i
++        if len(all_args) - arg_index <= num_defaults:
++            default_idx = num_defaults - (len(all_args) - arg_index)
++            default = ast_unparse(args.defaults[default_idx])
+         else:
+             default = Parameter.empty
+ 

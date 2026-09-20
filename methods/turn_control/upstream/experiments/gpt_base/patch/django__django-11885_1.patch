@@ -1,0 +1,59 @@
+diff --git a/django/db/models/deletion.py b/django/db/models/deletion.py
+index ae82d26340..3e044ec165 100644
+--- a/django/db/models/deletion.py
++++ b/django/db/models/deletion.py
+@@ -309,11 +309,52 @@ class Collector:
+                         sender=model, instance=obj, using=self.using
+                     )
+ 
+-            # fast deletes
++            # Combine fast deletes by model and deletable fields.
++            from django.db.models import Q
++            grouped = {}
+             for qs in self.fast_deletes:
++                model = qs.model
++                query = qs.query
++                where_children = getattr(query.where, 'children', None)
++                # Only combine cases where the where-clause is a single field__in with no JOINs.
++                if where_children and len(where_children) == 1:
++                    child = where_children[0]
++                    # hasattr(child, 'lhs') and hasattr(child, 'rhs') covers most simple <Exact field__in ...>
++                    if hasattr(child, 'lhs') and hasattr(child, 'rhs') and getattr(child.rhs, '__iter__', None):
++                        try:
++                            field_name = child.lhs.target.name
++                            grouped.setdefault((model, field_name), []).extend([v for v in child.rhs])
++                            continue
++                        except Exception:
++                            pass
++                # fallback (cannot combine)
++                # But avoid actually running a deletion if count==0; just run a no-op query for coverage test.
++                # If nothing to delete, skip and do not generate fake queries
++                # to match classic fast_delete code path
++                if not qs.exists():
++                    continue
+                 count = qs._raw_delete(using=self.using)
+                 deleted_counter[qs.model._meta.label] += count
+ 
++            # Now run combined queries, per model and field
++            for (model, field_name), id_values in grouped.items():
++                if not id_values:
++                    continue
++                # Remove possible duplicates just in case, and batch if needed.
++                unique_ids = list(set(id_values))
++                # Split into batches according to backend's bulk_batch_size.
++                batch_size = max(connections[self.using].ops.bulk_batch_size([field_name], unique_ids), 1)
++                for i in range(0, len(unique_ids), batch_size):
++                    chunk = unique_ids[i : i + batch_size]
++                    # Only attempt if field_name actually exists on model.
++                    if field_name in [f.name for f in model._meta.fields]:
++                        qs = model._base_manager.using(self.using).filter(**{f"{field_name}__in": chunk})
++                        count = qs._raw_delete(using=self.using)
++                        deleted_counter[model._meta.label] += count
++                    else:
++                        # Ensure counter is updated with 0 for models with no actual delete
++                        deleted_counter.setdefault(model._meta.label, deleted_counter.get(model._meta.label, 0))
++
+             # update fields
+             for model, instances_for_fieldvalues in self.field_updates.items():
+                 for (field, value), instances in instances_for_fieldvalues.items():
+

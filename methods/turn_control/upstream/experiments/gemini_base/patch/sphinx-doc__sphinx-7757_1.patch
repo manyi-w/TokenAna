@@ -1,0 +1,50 @@
+diff --git a/sphinx/util/inspect.py b/sphinx/util/inspect.py
+index 15f0d66e2..9d26ddf94 100644
+--- a/sphinx/util/inspect.py
++++ b/sphinx/util/inspect.py
+@@ -520,21 +520,31 @@ def signature_from_str(signature: str) -> inspect.Signature:
+     args = definition.args
+     params = []
+ 
+-    if hasattr(args, "posonlyargs"):
+-        for arg in args.posonlyargs:  # type: ignore
+-            annotation = ast_unparse(arg.annotation) or Parameter.empty
+-            params.append(Parameter(arg.arg, Parameter.POSITIONAL_ONLY,
+-                                    annotation=annotation))
+-
+-    for i, arg in enumerate(args.args):
+-        if len(args.args) - i <= len(args.defaults):
+-            default = ast_unparse(args.defaults[-len(args.args) + i])
++    all_args = []
++    if hasattr(args, 'posonlyargs'):
++        all_args.extend(args.posonlyargs)
++    all_args.extend(args.args)
++
++    # count of positional arguments
++    posargs_len = len(all_args)
++    # count of default values
++    defaults_len = len(args.defaults)
++
++    # create parameters for positional arguments
++    for i, arg in enumerate(all_args):
++        if i < len(getattr(args, 'posonlyargs', [])):
++            kind = Parameter.POSITIONAL_ONLY
+         else:
+-            default = Parameter.empty
++            kind = Parameter.POSITIONAL_OR_KEYWORD
+ 
+-        annotation = ast_unparse(arg.annotation) or Parameter.empty
+-        params.append(Parameter(arg.arg, Parameter.POSITIONAL_OR_KEYWORD,
+-                                default=default, annotation=annotation))
++        if posargs_len - i <= defaults_len:
++            # arguments with default value
++            default = ast_unparse(args.defaults[i - (posargs_len - defaults_len)])
++            params.append(Parameter(arg.arg, kind, default=default,
++                                    annotation=ast_unparse(arg.annotation) or Parameter.empty))
++        else:
++            params.append(Parameter(arg.arg, kind,
++                                    annotation=ast_unparse(arg.annotation) or Parameter.empty))
+ 
+     if args.vararg:
+         annotation = ast_unparse(args.vararg.annotation) or Parameter.empty
+

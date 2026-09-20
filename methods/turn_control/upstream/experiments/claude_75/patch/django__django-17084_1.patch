@@ -1,0 +1,49 @@
+diff --git a/django/db/models/expressions.py b/django/db/models/expressions.py
+index 280cb967b4..523745cca8 100644
+--- a/django/db/models/expressions.py
++++ b/django/db/models/expressions.py
+@@ -845,6 +845,9 @@ class F(Combinable):
+     def copy(self):
+         return copy.copy(self)
+ 
++    def get_refs(self):
++        return {self.name}
++
+ 
+ class ResolvedOuterRef(F):
+     """
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 13a6809dd8..edeaa3a734 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -436,6 +436,21 @@ class Query(BaseExpression):
+             )
+             or having
+         )
++        # Check if we're trying to aggregate over window functions.
++        # Window functions cannot be used inside aggregate functions, so we need
++        # a subquery if any aggregates reference annotations that contain window functions.
++        has_window_functions = any(
++            getattr(annotation, "contains_over_clause", False)
++            for annotation in self.annotations.values()
++        )
++        refs_window_functions = has_window_functions and any(
++            any(
++                alias in aggregate.get_refs()
++                for alias, annotation in self.annotations.items()
++                if getattr(annotation, "contains_over_clause", False)
++            )
++            for aggregate in aggregate_exprs.values()
++        )
+         # Decide if we need to use a subquery.
+         #
+         # Existing aggregations would cause incorrect results as
+@@ -451,6 +466,7 @@ class Query(BaseExpression):
+             or self.is_sliced
+             or has_existing_aggregation
+             or refs_subquery
++            or refs_window_functions
+             or qualify
+             or self.distinct
+             or self.combinator
+

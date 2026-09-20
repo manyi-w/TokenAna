@@ -1,0 +1,65 @@
+diff --git a/sympy/matrices/expressions/blockmatrix.py b/sympy/matrices/expressions/blockmatrix.py
+index 95302a05ca..eea4afe458 100644
+--- a/sympy/matrices/expressions/blockmatrix.py
++++ b/sympy/matrices/expressions/blockmatrix.py
+@@ -162,13 +162,58 @@ def structurally_equal(self, other):
+             and self.colblocksizes == other.colblocksizes)
+ 
+     def _blockmul(self, other):
++        # Tighten block multiplication to preserve ZeroMatrix block identity.
+         if (isinstance(other, BlockMatrix) and
+                 self.colblocksizes == other.rowblocksizes):
+-            return BlockMatrix(self.blocks*other.blocks)
+-
++            from sympy.matrices import Matrix
++            res_blocks = []
++            A_blocks = self.blocks
++            B_blocks = other.blocks
++            for i in range(self.blockshape[0]):
++                res_row = []
++                for j in range(other.blockshape[1]):
++                    v = None
++                    for k in range(self.blockshape[1]):
++                        a = A_blocks[i, k]
++                        b = B_blocks[k, j]
++                        if self._is_zero_block(a) or self._is_zero_block(b):
++                            partial = self._zero_block(a.shape[0], b.shape[1])
++                        else:
++                            partial = a*b
++                        if v is None:
++                            v = partial
++                        else:
++                            if self._is_zero_block(v):
++                                v = partial
++                            elif self._is_zero_block(partial):
++                                continue
++                            else:
++                                v = v + partial
++                    res_row.append(v)
++                res_blocks.append(res_row)
++            return BlockMatrix(Matrix(res_blocks))
+         return self * other
+ 
++
+     def _blockadd(self, other):
++        if (isinstance(other, BlockMatrix)
++                and self.structurally_equal(other)):
++            return BlockMatrix(self.blocks + other.blocks)
++        return self + other
++
++    def _zero_block(self, rows, cols):
++        """Utility to construct a ZeroMatrix block of a given shape (for block arithmetic type safety)."""
++        from sympy.matrices.expressions.matexpr import ZeroMatrix
++        return ZeroMatrix(rows, cols)
++
++    @staticmethod
++    def _is_zero_block(block):
++        """Utility static method to check if a matrix block is zero-like (Zero, 0, ZeroMatrix)."""
++        from sympy import S
++        from sympy.matrices.expressions.matexpr import ZeroMatrix
++        return (block == 0 or block == S.Zero 
++                or getattr(block, 'is_ZeroMatrix', False) or isinstance(block, ZeroMatrix))
++
+         if (isinstance(other, BlockMatrix)
+                 and self.structurally_equal(other)):
+             return BlockMatrix(self.blocks + other.blocks)

@@ -1,0 +1,84 @@
+diff --git a/django/contrib/admin/options.py b/django/contrib/admin/options.py
+index 5f07a4208a..0a8e2e7503 100644
+--- a/django/contrib/admin/options.py
++++ b/django/contrib/admin/options.py
+@@ -2011,14 +2011,16 @@ class ModelAdmin(BaseModelAdmin):
+             )
+             if formset.is_valid():
+                 changecount = 0
+-                for form in formset.forms:
+-                    if form.has_changed():
+-                        obj = self.save_form(request, form, change=True)
+-                        self.save_model(request, obj, form, change=True)
+-                        self.save_related(request, form, formsets=[], change=True)
+-                        change_msg = self.construct_change_message(request, form, None)
+-                        self.log_change(request, obj, change_msg)
+-                        changecount += 1
++                # Wrap list_editable processing in a transaction
++                with transaction.atomic(using=router.db_for_write(self.model)):
++                    for form in formset.forms:
++                        if form.has_changed():
++                            obj = self.save_form(request, form, change=True)
++                            self.save_model(request, obj, form, change=True)
++                            self.save_related(request, form, formsets=[], change=True)
++                            change_msg = self.construct_change_message(request, form, None)
++                            self.log_change(request, obj, change_msg)
++                            changecount += 1
+ 
+                 if changecount:
+                     msg = ngettext(
+diff --git a/django/contrib/admin/tests.py b/django/contrib/admin/tests.py
+index 70c3949fef..5b50f8d900 100644
+--- a/django/contrib/admin/tests.py
++++ b/django/contrib/admin/tests.py
+@@ -232,3 +232,49 @@ class AdminSeleniumTestCase(SeleniumTestCase, StaticLiveServerTestCase):
+             .find(klass)
+             != -1
+         )
++
++
++
++import pytest
++from django.test import override_settings, TestCase
++from django.contrib.auth import get_user_model
++from django.contrib.admin.sites import AdminSite
++from django.http import HttpRequest
++from django.contrib import admin
++from django.db import models
++from django.contrib.admin.options import ModelAdmin
++
++class EditableModel(models.Model):
++    name = models.CharField(max_length=30)
++
++    class Meta:
++        app_label = 'admin'
++
++class EditableAdmin(ModelAdmin):
++    list_display = ["id", "name"]
++    list_editable = ["name"]
++
++site = AdminSite(name="test")
++site.register(EditableModel, EditableAdmin)
++
++@pytest.mark.django_db
++@override_settings(INSTALLED_APPS=[*admin.apps.DEFAULT_APP_CONFIG, 'django.contrib.sessions', 'django.contrib.contenttypes', 'django.contrib.auth', 'django.contrib.messages'])
++def test_changelist_list_editable_transaction():
++    request = HttpRequest()
++    request.method = "POST"
++    request.user = get_user_model().objects.create_superuser('a','a@a.com','a')
++    # Setup a new model instance
++    obj = EditableModel.objects.create(name="initial")
++    # POST payload to trigger list_editable change
++    request.POST = {
++        'form-0-id': str(obj.pk),
++        'form-0-name': 'changed',
++        'form-TOTAL_FORMS': '1',
++        'form-INITIAL_FORMS': '1',
++        '_save': 'Save',
++    }
++    ma = EditableAdmin(EditableModel, site)
++    # Should run without errors (including transaction handling)
++    ma.changelist_view(request)
++    obj.refresh_from_db()
++    assert obj.name == 'changed'
+

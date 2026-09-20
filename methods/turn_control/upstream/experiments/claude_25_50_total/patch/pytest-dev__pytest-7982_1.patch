@@ -1,0 +1,44 @@
+diff --git a/src/_pytest/pathlib.py b/src/_pytest/pathlib.py
+index f0bdb1481..d88fd28fc 100644
+--- a/src/_pytest/pathlib.py
++++ b/src/_pytest/pathlib.py
+@@ -555,11 +555,34 @@ def visit(
+ 
+     Entries at each directory level are sorted.
+     """
+-    entries = sorted(os.scandir(path), key=lambda entry: entry.name)
+-    yield from entries
+-    for entry in entries:
+-        if entry.is_dir(follow_symlinks=False) and recurse(entry):
+-            yield from visit(entry.path, recurse)
++    # Keep track of visited real paths to avoid infinite loops with circular symlinks
++    visited = set()  # type: Set[str]
++    
++    def _visit_impl(current_path: str) -> Iterator["os.DirEntry[str]"]:
++        # Resolve the current path to detect cycles
++        try:
++            real_path = os.path.realpath(current_path)
++        except OSError:
++            # If we can't resolve the path (broken symlink, permission issues, etc.)
++            # just use the original path
++            real_path = current_path
++            
++        if real_path in visited:
++            return  # Avoid cycles
++        visited.add(real_path)
++        
++        try:
++            entries = sorted(os.scandir(current_path), key=lambda entry: entry.name)
++        except OSError:
++            # Handle cases where we can't scan the directory
++            return
++            
++        yield from entries
++        for entry in entries:
++            if entry.is_dir() and recurse(entry):
++                yield from _visit_impl(entry.path)
++    
++    yield from _visit_impl(path)
+ 
+ 
+ def absolutepath(path: Union[Path, str]) -> Path:

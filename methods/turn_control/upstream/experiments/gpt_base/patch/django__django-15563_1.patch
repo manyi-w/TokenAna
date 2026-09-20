@@ -1,0 +1,37 @@
+diff --git a/django/db/models/sql/subqueries.py b/django/db/models/sql/subqueries.py
+index 04063f73bc..8b9e4148cf 100644
+--- a/django/db/models/sql/subqueries.py
++++ b/django/db/models/sql/subqueries.py
+@@ -118,8 +118,32 @@ class UpdateQuery(Query):
+         Add (name, value) to an update query for an ancestor model.
+ 
+         Update are coalesced so that only one update query per ancestor is run.
++        If the queryset's model is a subclass (not model), constrain update of parent
++        to only rows related to current queryset.
+         """
+         self.related_updates.setdefault(model, []).append((field, None, value))
++        # If updating a parent (model) table from a child (self.model), restrict parent update to relevant PKs
++        if self.model is not model:
++            # Find the join from self.model to model (may assume single inheritance chain)
++            # We want PKs in the parent table matching keys in the base table (child)
++            # Use the parent's PK values that correspond to current queryset
++            # This is what .filter(pk__in=child_table.values(parent_link_field)) would do
++            # We set related_ids as all PKs of parent which map to queryset
++            from django.db import connections
++            conn = connections[self.db]
++            child_table = self.model._meta.db_table
++            parent_opts = model._meta
++            parent_pk_col = parent_opts.pk.column
++            # child PK (in parent) column: typically parent_link_field.column
++            for parent_link_field in self.model._meta.parents.values():
++                if parent_link_field and parent_link_field.remote_field and parent_link_field.remote_field.model is model:
++                    child_fk_col = parent_link_field.column
++                    break
++            else:
++                # Fallback to the obvious (possibly inaccurate for exotic cases)
++                child_fk_col = parent_pk_col
++            sql = f"SELECT {conn.ops.quote_name(child_fk_col)} FROM {conn.ops.quote_name(child_table)}"
++            self.related_ids = models.expressions.RawSQL(sql, [])
+ 
+     def get_related_updates(self):
+         """

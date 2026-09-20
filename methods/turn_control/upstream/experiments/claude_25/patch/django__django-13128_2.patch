@@ -1,0 +1,41 @@
+diff --git a/django/db/models/expressions.py b/django/db/models/expressions.py
+index d913658291..f4cc7a930d 100644
+--- a/django/db/models/expressions.py
++++ b/django/db/models/expressions.py
+@@ -473,6 +473,36 @@ class CombinedExpression(SQLiteNumericMixin, Expression):
+         sql = connection.ops.combine_expression(self.connector, expressions)
+         return expression_wrapper % sql, expression_params
+ 
++    def _resolve_output_field(self):
++        try:
++            lhs_type = self.lhs.output_field.get_internal_type()
++        except FieldError:
++            lhs_type = None
++        try:
++            rhs_type = self.rhs.output_field.get_internal_type()
++        except FieldError:
++            rhs_type = None
++        
++        datetime_fields = {'DateField', 'DateTimeField', 'TimeField'}
++        
++        # Handle temporal subtraction - when subtracting two datetime fields, result is duration
++        if self.connector == self.SUB and lhs_type in datetime_fields and lhs_type == rhs_type:
++            return fields.DurationField()
++        
++        # Handle duration arithmetic
++        if lhs_type == 'DurationField' and rhs_type == 'DurationField':
++            # Duration +/- Duration = Duration
++            return fields.DurationField()
++        elif lhs_type in datetime_fields and rhs_type == 'DurationField':
++            # DateTime +/- Duration = DateTime (keep the datetime field type)
++            return self.lhs.output_field
++        elif lhs_type == 'DurationField' and rhs_type in datetime_fields:
++            # Duration + DateTime = DateTime (keep the datetime field type)
++            return self.rhs.output_field
++        
++        # Fall back to parent implementation for other cases
++        return super()._resolve_output_field()
++
+     def resolve_expression(self, query=None, allow_joins=True, reuse=None, summarize=False, for_save=False):
+         c = self.copy()
+         c.is_summary = summarize

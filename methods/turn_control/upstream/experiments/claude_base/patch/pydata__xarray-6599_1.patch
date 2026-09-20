@@ -1,0 +1,53 @@
+diff --git a/xarray/core/computation.py b/xarray/core/computation.py
+index 823cbe02..d83b3161 100644
+--- a/xarray/core/computation.py
++++ b/xarray/core/computation.py
+@@ -1905,6 +1905,11 @@ def polyval(
+     coeffs = coeffs.reindex(
+         {degree_dim: np.arange(max_deg + 1)}, fill_value=0, copy=False
+     )
++    # For backward compatibility: if coord is a DataArray with a coordinate
++    # of the same name, use that coordinate instead (like get_clean_interp_index did)
++    from .dataarray import DataArray
++    if isinstance(coord, DataArray) and coord.name in coord.coords:
++        coord = coord.coords[coord.name]
+     coord = _ensure_numeric(coord)  # type: ignore # https://github.com/python/mypy/issues/1533 ?
+ 
+     # using Horner's method
+@@ -1918,26 +1923,32 @@ def polyval(
+ 
+ 
+ def _ensure_numeric(data: T_Xarray) -> T_Xarray:
+-    """Converts all datetime64 variables to float64
++    """Converts all datetime64 and timedelta64 variables to float64
+ 
+     Parameters
+     ----------
+     data : DataArray or Dataset
+-        Variables with possible datetime dtypes.
++        Variables with possible datetime or timedelta dtypes.
+ 
+     Returns
+     -------
+     DataArray or Dataset
+-        Variables with datetime64 dtypes converted to float64.
++        Variables with datetime64 or timedelta64 dtypes converted to float64.
+     """
+     from .dataset import Dataset
+ 
+     def to_floatable(x: DataArray) -> DataArray:
+         if x.dtype.kind in "mM":
++            # For datetime64, use a fixed epoch offset (1970-01-01)
++            # For timedelta64, use offset=None to automatically determine minimum offset
++            if x.dtype.kind == "M":
++                offset = np.datetime64("1970-01-01")
++            else:  # timedelta64
++                offset = None
+             return x.copy(
+                 data=datetime_to_numeric(
+                     x.data,
+-                    offset=np.datetime64("1970-01-01"),
++                    offset=offset,
+                     datetime_unit="ns",
+                 ),
+             )

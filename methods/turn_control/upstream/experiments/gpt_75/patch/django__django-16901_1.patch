@@ -1,0 +1,24 @@
+diff --git a/django/db/models/sql/where.py b/django/db/models/sql/where.py
+index aaab1730b7..9ed6add05c 100644
+--- a/django/db/models/sql/where.py
++++ b/django/db/models/sql/where.py
+@@ -130,12 +130,17 @@ class WhereNode(tree.Node):
+             #   a XOR b XOR c XOR ...
+             # to:
+             #   (a OR b OR c OR ...) AND (a + b + c + ...) == 1
++            from django.db.models.functions.math import Mod
++            from django.db.models import Value
++
+             lhs = self.__class__(self.children, OR)
+             rhs_sum = reduce(
+                 operator.add,
+                 (Case(When(c, then=1), default=0) for c in self.children),
+             )
+-            rhs = Exact(1, rhs_sum)
++            # Fix: Check if the count of true conditions is odd (XOR parity)
++            rhs_mod = Mod(rhs_sum, Value(2))
++            rhs = Exact(1, rhs_mod)
+             return self.__class__([lhs, rhs], AND, self.negated).as_sql(
+                 compiler, connection
+             )
+

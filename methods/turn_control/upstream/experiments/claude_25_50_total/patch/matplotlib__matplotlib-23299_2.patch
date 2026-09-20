@@ -1,0 +1,36 @@
+diff --git a/lib/matplotlib/__init__.py b/lib/matplotlib/__init__.py
+index c268a56724..63c9cd2805 100644
+--- a/lib/matplotlib/__init__.py
++++ b/lib/matplotlib/__init__.py
+@@ -1175,7 +1175,30 @@ def get_backend():
+     --------
+     matplotlib.use
+     """
+-    return rcParams['backend']
++    # Check if we need to resolve the backend without triggering figure closure
++    backend = rcParams._get_backend_or_none()
++    if backend is not None:
++        return backend
++    
++    # If backend is not resolved and there are existing figures, we need to be
++    # careful not to close them during auto-resolution
++    from matplotlib import pyplot as plt
++    if plt._pylab_helpers.Gcf.get_num_fig_managers() > 0:
++        # Temporarily store existing figures
++        existing_figs = dict(plt._pylab_helpers.Gcf.figs)
++        
++        # Get the backend (this may trigger auto-resolution)
++        resolved_backend = rcParams['backend']
++        
++        # Restore any figures that were closed during auto-resolution
++        for num, manager in existing_figs.items():
++            if num not in plt._pylab_helpers.Gcf.figs:
++                plt._pylab_helpers.Gcf.figs[num] = manager
++        
++        return resolved_backend
++    else:
++        # No existing figures, safe to trigger auto-resolution
++        return rcParams['backend']
+ 
+ 
+ def interactive(b):

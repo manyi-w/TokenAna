@@ -1,0 +1,35 @@
+diff --git a/django/core/serializers/base.py b/django/core/serializers/base.py
+index da85cb4b92..a91e3fb78c 100644
+--- a/django/core/serializers/base.py
++++ b/django/core/serializers/base.py
+@@ -336,13 +336,24 @@ def build_instance(Model, data, db):
+         and hasattr(default_manager, "get_by_natural_key")
+         and hasattr(Model, "natural_key")
+     ):
+-        natural_key = Model(**data).natural_key()
+         try:
+-            data[Model._meta.pk.attname] = Model._meta.pk.to_python(
+-                default_manager.db_manager(db).get_by_natural_key(*natural_key).pk
+-            )
+-        except Model.DoesNotExist:
++            # Try to create a temporary instance to get its natural key.
++            # This may fail if the instance has foreign key dependencies
++            # that haven't been resolved yet (e.g., when deserializing
++            # to a non-default database with forward references).
++            natural_key = Model(**data).natural_key()
++        except Exception:
++            # If we can't create the natural key (e.g., due to missing
++            # foreign key dependencies), skip the natural key lookup
++            # and proceed with creating the instance directly.
+             pass
++        else:
++            try:
++                data[Model._meta.pk.attname] = Model._meta.pk.to_python(
++                    default_manager.db_manager(db).get_by_natural_key(*natural_key).pk
++                )
++            except Model.DoesNotExist:
++                pass
+     return Model(**data)
+ 
+ 
+

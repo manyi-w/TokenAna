@@ -1,0 +1,39 @@
+diff --git a/sphinx/ext/autodoc/__init__.py b/sphinx/ext/autodoc/__init__.py
+index ddfd2b365..09f97ea2e 100644
+--- a/sphinx/ext/autodoc/__init__.py
++++ b/sphinx/ext/autodoc/__init__.py
+@@ -598,14 +598,33 @@ class Documenter:
+             attr_docs = self.analyzer.find_attr_docs()
+             if self.objpath:
+                 key = ('.'.join(self.objpath[:-1]), self.objpath[-1])
++                found_attr = False
+                 if key in attr_docs:
+                     no_docstring = True
+                     # make a copy of docstring for attributes to avoid cache
+                     # the change of autodoc-process-docstring event.
+                     docstrings = [list(attr_docs[key])]
++                    found_attr = True
+ 
+                     for i, line in enumerate(self.process_doc(docstrings)):
+                         self.add_line(line, sourcename, i)
++                # Try base classes if not found in this class and inherited-members enabled
++                if not found_attr and getattr(self.options, 'inherited_members', False):
++                    import inspect
++                    if isinstance(self.object, type):  # is a class
++                        mro = inspect.getmro(self.object)[1:]  # skip this class
++                        attrname = self.objpath[-1]
++                        for base in mro:
++                            base_ns = getattr(base, '__module__', None)
++                            base_name = getattr(base, '__name__', None)
++                            if base_ns and base_name:
++                                base_key = (f'{base_ns}.{base_name}', attrname)
++                                if base_key in attr_docs:
++                                    no_docstring = True
++                                    docstrings = [list(attr_docs[base_key])]
++                                    for i, line in enumerate(self.process_doc(docstrings)):
++                                        self.add_line(line, sourcename, i)
++                                    break
+ 
+         # add content from docstrings
+         if not no_docstring:
+

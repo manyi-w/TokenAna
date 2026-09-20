@@ -1,0 +1,109 @@
+diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py
+index 59a5d6abbb..fd76e65ec6 100644
+--- a/django/db/models/sql/compiler.py
++++ b/django/db/models/sql/compiler.py
+@@ -1836,7 +1836,30 @@ class SQLUpdateCompiler(SQLCompiler):
+         query.clear_ordering(force=True)
+         query.extra = {}
+         query.select = []
+-        query.add_fields([query.get_meta().pk.name])
++        
++        # For multiple inheritance, we need to collect the correct foreign key IDs 
++        # for each related model, not just the main model's primary key
++        if self.query.related_updates:
++            # Get the parent field mappings from the model's _meta.parents
++            model_meta = self.query.get_meta()
++            parent_fields = {}
++            
++            for related_model in self.query.related_updates.keys():
++                # Find the field that links this model to the related_model
++                parent_field = model_meta.parents.get(related_model)
++                if parent_field:
++                    parent_fields[related_model] = parent_field.name
++                    query.add_fields([parent_field.name])
++                else:
++                    # Fallback to primary key if no parent relationship found
++                    query.add_fields([query.get_meta().pk.name])
++                    
++            # If we didn't find any parent fields, use the primary key
++            if not parent_fields:
++                query.add_fields([query.get_meta().pk.name])
++        else:
++            query.add_fields([query.get_meta().pk.name])
++            
+         super().pre_sql_setup()
+ 
+         must_pre_select = (
+@@ -1850,11 +1873,37 @@ class SQLUpdateCompiler(SQLCompiler):
+             # Either we're using the idents in multiple update queries (so
+             # don't want them to change), or the db backend doesn't support
+             # selecting from the updating table (e.g. MySQL).
+-            idents = []
++            
++            # Execute the query to get the IDs
++            result_rows = []
+             for rows in query.get_compiler(self.using).execute_sql(MULTI):
+-                idents.extend(r[0] for r in rows)
+-            self.query.add_filter("pk__in", idents)
+-            self.query.related_ids = idents
++                result_rows.extend(rows)
++            
++            if self.query.related_updates:
++                # Collect IDs for each related model
++                model_meta = self.query.get_meta()
++                field_index = 0
++                
++                for related_model in self.query.related_updates.keys():
++                    parent_field = model_meta.parents.get(related_model)
++                    if parent_field:
++                        # Extract the IDs for this specific model
++                        model_ids = [row[field_index] for row in result_rows]
++                        self.query.related_ids_by_model[related_model] = model_ids
++                        field_index += 1
++                
++                # For backward compatibility and the main update, use the first set of IDs
++                if result_rows:
++                    idents = [row[0] for row in result_rows]
++                    self.query.add_filter("pk__in", idents)
++                    self.query.related_ids = idents
++            else:
++                # Original behavior for single table updates
++                idents = []
++                for row in result_rows:
++                    idents.extend(row[0] for row in [row])
++                self.query.add_filter("pk__in", idents)
++                self.query.related_ids = idents
+         else:
+             # The fast path. Filters and updates in one query.
+             self.query.add_filter("pk__in", query)
+diff --git a/django/db/models/sql/subqueries.py b/django/db/models/sql/subqueries.py
+index 04063f73bc..4a80f28293 100644
+--- a/django/db/models/sql/subqueries.py
++++ b/django/db/models/sql/subqueries.py
+@@ -61,11 +61,13 @@ class UpdateQuery(Query):
+         """
+         self.values = []
+         self.related_ids = None
++        self.related_ids_by_model = {}
+         self.related_updates = {}
+ 
+     def clone(self):
+         obj = super().clone()
+         obj.related_updates = self.related_updates.copy()
++        obj.related_ids_by_model = self.related_ids_by_model.copy()
+         return obj
+ 
+     def update_batch(self, pk_list, values, using):
+@@ -133,7 +135,10 @@ class UpdateQuery(Query):
+         for model, values in self.related_updates.items():
+             query = UpdateQuery(model)
+             query.values = values
+-            if self.related_ids is not None:
++            # Use the specific IDs for this model if available, otherwise fall back to related_ids
++            if model in self.related_ids_by_model:
++                query.add_filter("pk__in", self.related_ids_by_model[model])
++            elif self.related_ids is not None:
+                 query.add_filter("pk__in", self.related_ids)
+             result.append(query)
+         return result
+

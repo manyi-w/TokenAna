@@ -1,0 +1,101 @@
+diff --git a/sphinx/ext/autodoc/__init__.py b/sphinx/ext/autodoc/__init__.py
+index ddfd2b365..fe8e75eda 100644
+--- a/sphinx/ext/autodoc/__init__.py
++++ b/sphinx/ext/autodoc/__init__.py
+@@ -584,6 +584,34 @@ class Documenter:
+         else:
+             return 'docstring of %s' % fullname
+ 
++    def get_attr_docs_from_parents(self, membername: str) -> Optional[List[str]]:
++        """Get attribute documentation from parent classes."""
++        if not inspect.isclass(self.parent):
++            return None
++        
++        # Check each parent class in the MRO for attribute documentation
++        for cls in self.parent.__mro__:
++            if cls == self.parent:
++                continue  # Skip the current class, already checked
++                
++            try:
++                module = safe_getattr(cls, '__module__')
++                qualname = safe_getattr(cls, '__qualname__')
++                
++                if module and qualname:
++                    try:
++                        analyzer = ModuleAnalyzer.for_module(module)
++                        analyzer.analyze()
++                        key = (qualname, membername)
++                        if key in analyzer.attr_docs:
++                            return list(analyzer.attr_docs[key])
++                    except (AttributeError, PycodeError):
++                        continue
++            except (AttributeError, PycodeError):
++                continue
++        
++        return None
++
+     def add_content(self, more_content: Optional[StringList], no_docstring: bool = False
+                     ) -> None:
+         """Add content from docstrings, attribute documentation and user."""
+@@ -606,6 +634,15 @@ class Documenter:
+ 
+                     for i, line in enumerate(self.process_doc(docstrings)):
+                         self.add_line(line, sourcename, i)
++                elif self.objpath:
++                    # Try to get attribute documentation from parent classes
++                    inherited_docs = self.get_attr_docs_from_parents(self.objpath[-1])
++                    if inherited_docs:
++                        no_docstring = True
++                        docstrings = [inherited_docs]
++                        
++                        for i, line in enumerate(self.process_doc(docstrings)):
++                            self.add_line(line, sourcename, i)
+ 
+         # add content from docstrings
+         if not no_docstring:
+@@ -679,6 +716,35 @@ class Documenter:
+ 
+             return False
+ 
++        def is_attr_documented_in_parent_classes(membername: str) -> bool:
++            """Check if an attribute is documented in any parent class."""
++            if not inspect.isclass(self.object):
++                return False
++            
++            # Check each parent class in the MRO for attribute documentation
++            for cls in self.object.__mro__:
++                if cls == self.object:
++                    continue  # Skip the current class, already checked
++                    
++                try:
++                    module = safe_getattr(cls, '__module__')
++                    qualname = safe_getattr(cls, '__qualname__')
++                    
++                    if module and qualname:
++                        from sphinx.pycode import ModuleAnalyzer
++                        try:
++                            analyzer = ModuleAnalyzer.for_module(module)
++                            analyzer.analyze()
++                            key = (qualname, membername)
++                            if key in analyzer.attr_docs:
++                                return True
++                        except (AttributeError, PycodeError):
++                            continue
++                except (AttributeError, PycodeError):
++                    continue
++            
++            return False
++
+         ret = []
+ 
+         # search for members in source code too
+@@ -746,7 +812,7 @@ class Documenter:
+                         keep = has_doc or self.options.undoc_members
+                 else:
+                     keep = False
+-            elif (namespace, membername) in attr_docs:
++            elif (namespace, membername) in attr_docs or is_attr_documented_in_parent_classes(membername):
+                 if want_all and isprivate:
+                     if self.options.private_members is None:
+                         keep = False
+

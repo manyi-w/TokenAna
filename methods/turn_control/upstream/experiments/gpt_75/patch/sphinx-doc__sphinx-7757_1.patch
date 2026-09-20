@@ -1,0 +1,53 @@
+diff --git a/sphinx/util/inspect.py b/sphinx/util/inspect.py
+index 15f0d66e2..79ad05cf1 100644
+--- a/sphinx/util/inspect.py
++++ b/sphinx/util/inspect.py
+@@ -521,20 +521,36 @@ def signature_from_str(signature: str) -> inspect.Signature:
+     params = []
+ 
+     if hasattr(args, "posonlyargs"):
+-        for arg in args.posonlyargs:  # type: ignore
++        # Combine posonlyargs and args for finding defaults in the correct order
++        total_args = list(args.posonlyargs) + list(args.args)
++        num_total = len(total_args)
++        num_defaults = len(args.defaults)
++        # Right-align defaults: last N args get defaults
++        defaults = [Parameter.empty] * (num_total - num_defaults) + list(args.defaults)
++        # Assign defaults for positional-only arguments
++        for i, arg in enumerate(args.posonlyargs):  # type: ignore
+             annotation = ast_unparse(arg.annotation) or Parameter.empty
++            default = ast_unparse(defaults[i]) if defaults[i] is not Parameter.empty else Parameter.empty
+             params.append(Parameter(arg.arg, Parameter.POSITIONAL_ONLY,
+-                                    annotation=annotation))
+-
+-    for i, arg in enumerate(args.args):
+-        if len(args.args) - i <= len(args.defaults):
+-            default = ast_unparse(args.defaults[-len(args.args) + i])
+-        else:
+-            default = Parameter.empty
++                                    default=default, annotation=annotation))
++        # Assign defaults for positional-or-keyword arguments
++        for j, arg in enumerate(args.args):
++            real_idx = len(args.posonlyargs) + j
++            annotation = ast_unparse(arg.annotation) or Parameter.empty
++            default = ast_unparse(defaults[real_idx]) if defaults[real_idx] is not Parameter.empty else Parameter.empty
++            params.append(Parameter(arg.arg, Parameter.POSITIONAL_OR_KEYWORD,
++                                    default=default, annotation=annotation))
++    else:
++        # Fallback for older Python: only args
++        for i, arg in enumerate(args.args):
++            if len(args.args) - i <= len(args.defaults):
++                default = ast_unparse(args.defaults[-len(args.args) + i])
++            else:
++                default = Parameter.empty
+ 
+-        annotation = ast_unparse(arg.annotation) or Parameter.empty
+-        params.append(Parameter(arg.arg, Parameter.POSITIONAL_OR_KEYWORD,
+-                                default=default, annotation=annotation))
++            annotation = ast_unparse(arg.annotation) or Parameter.empty
++            params.append(Parameter(arg.arg, Parameter.POSITIONAL_OR_KEYWORD,
++                                    default=default, annotation=annotation))
+ 
+     if args.vararg:
+         annotation = ast_unparse(args.vararg.annotation) or Parameter.empty
+

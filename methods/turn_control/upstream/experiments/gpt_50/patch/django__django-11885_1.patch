@@ -1,0 +1,56 @@
+diff --git a/django/db/models/deletion.py b/django/db/models/deletion.py
+index ae82d26340..c3fc14a78c 100644
+--- a/django/db/models/deletion.py
++++ b/django/db/models/deletion.py
+@@ -67,9 +67,8 @@ class Collector:
+         # Initially, {model: {instances}}, later values become lists.
+         self.data = {}
+         self.field_updates = {}  # {model: {(field, value): {instances}}}
+-        # fast_deletes is a list of queryset-likes that can be deleted without
+-        # fetching the objects into memory.
+-        self.fast_deletes = []
++        # fast_deletes is a map: { (model, db_table): [qs, ...] }
++        self.fast_deletes = {}
+ 
+         # Tracks deletion-order dependency for databases without transactions
+         # or ability to defer constraint checks. Only concrete model classes
+@@ -191,7 +190,11 @@ class Collector:
+         If 'keep_parents' is True, data of parent model's will be not deleted.
+         """
+         if self.can_fast_delete(objs):
+-            self.fast_deletes.append(objs)
++            if hasattr(objs, 'model'):
++                key = (objs.model, objs.model._meta.db_table)
++                self.fast_deletes.setdefault(key, []).append(objs)
++            else:
++                self.fast_deletes.setdefault((objs.__class__, objs.__class__._meta.db_table), []).append(objs)
+             return
+         new_objs = self.add(objs, source, nullable,
+                             reverse_dependency=reverse_dependency)
+@@ -310,9 +313,23 @@ class Collector:
+                     )
+ 
+             # fast deletes
+-            for qs in self.fast_deletes:
+-                count = qs._raw_delete(using=self.using)
+-                deleted_counter[qs.model._meta.label] += count
++            from django.db.models import Q
++            for (model, db_table), qs_list in self.fast_deletes.items():
++                if not qs_list:
++                    continue
++                base_qs = qs_list[0].model._base_manager.using(self.using).all()
++                combined_q = None
++                for qs in qs_list:
++                    if combined_q is None:
++                        combined_q = Q(qs.query.where)
++                    else:
++                        combined_q |= Q(qs.query.where)
++                if combined_q is not None:
++                    final_qs = base_qs.filter(combined_q)
++                else:
++                    final_qs = base_qs
++                count = final_qs._raw_delete(using=self.using)
++                deleted_counter[model._meta.label] += count
+ 
+             # update fields
+             for model, instances_for_fieldvalues in self.field_updates.items():

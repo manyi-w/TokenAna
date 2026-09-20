@@ -1,0 +1,32 @@
+diff --git a/django/utils/numberformat.py b/django/utils/numberformat.py
+index 88b35fc435..dfd92090e4 100644
+--- a/django/utils/numberformat.py
++++ b/django/utils/numberformat.py
+@@ -29,8 +29,26 @@ def format(number, decimal_sep, decimal_pos=None, grouping=0, thousand_sep='',
+     if isinstance(number, Decimal):
+         # Format values with more than 200 digits (an arbitrary cutoff) using
+         # scientific notation to avoid high memory usage in {:f}'.format().
+-        _, digits, exponent = number.as_tuple()
++        dec_sign, digits, exponent = number.as_tuple()
+         if abs(exponent) + len(digits) > 200:
++            # When decimal_pos is specified and the number would effectively 
++            # be zero at that precision, return zero with proper decimal places
++            if decimal_pos is not None:
++                # Check if the number is smaller than what can be represented
++                # with the given decimal_pos. Only do this for simple cases where
++                # all digits are effectively zero (like 1e-200 but not 1.234e-200)
++                min_representable_exponent = -decimal_pos
++                if exponent < min_representable_exponent and len(digits) == 1 and digits[0] == 1:
++                    # The number is too small to be represented with decimal_pos
++                    # decimal places and is a simple power of 10, so return zero
++                    sign_str = '-' if dec_sign else ''
++                    if decimal_pos > 0:
++                        return sign_str + '0' + decimal_sep + ('0' * decimal_pos)
++                    else:
++                        return sign_str + '0'
++            
++            # Use exponential notation for very large/small numbers when
++            # decimal_pos is not specified or the number is still significant
+             number = '{:e}'.format(number)
+             coefficient, exponent = number.split('e')
+             # Format the coefficient.

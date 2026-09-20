@@ -1,0 +1,139 @@
+diff --git a/lib/matplotlib/_mathtext.py b/lib/matplotlib/_mathtext.py
+index 09f5c61879..5ac2d6dbb4 100644
+--- a/lib/matplotlib/_mathtext.py
++++ b/lib/matplotlib/_mathtext.py
+@@ -122,9 +122,16 @@ class Output:
+         shifted = ship(self.box, (-xmin, -ymin))
+ 
+         for ox, oy, info in shifted.glyphs:
++            # Try to propagate mtext antialiasing if available on info:
++            antialiased = mpl.rcParams['text.antialiased']
++            mtext = getattr(info, 'mtext', None)
++            if mtext is not None and hasattr(mtext, 'get_antialiased'):
++                aa = mtext.get_antialiased()
++                if aa is not None:
++                    antialiased = aa
+             info.font.draw_glyph_to_bitmap(
+                 image, ox, oy - info.metrics.iceberg, info.glyph,
+-                antialiased=mpl.rcParams['text.antialiased'])
++                antialiased=antialiased)
+         for x1, y1, x2, y2 in shifted.rects:
+             height = max(int(y2 - y1) - 1, 0)
+             if height == 0:
+diff --git a/lib/matplotlib/backends/backend_agg.py b/lib/matplotlib/backends/backend_agg.py
+index 7d038a998f..3dbe43b976 100644
+--- a/lib/matplotlib/backends/backend_agg.py
++++ b/lib/matplotlib/backends/backend_agg.py
+@@ -205,8 +205,15 @@ class RendererAgg(RendererBase):
+         # We pass '0' for angle here, since it will be rotated (in raster
+         # space) in the following call to draw_text_image).
+         font.set_text(s, 0, flags=get_hinting_flag())
++        # Determine antialias from mtext if available, else fallback to rcParams
++        if mtext is not None and hasattr(mtext, 'get_antialiased'):
++            antialiased = mtext.get_antialiased()
++            if antialiased is None:
++                antialiased = mpl.rcParams['text.antialiased']
++        else:
++            antialiased = mpl.rcParams['text.antialiased']
+         font.draw_glyphs_to_bitmap(
+-            antialiased=mpl.rcParams['text.antialiased'])
++            antialiased=antialiased)
+         d = font.get_descent() / 64.0
+         # The descent needs to be adjusted for the angle.
+         xo, yo = font.get_bitmap_offset()
+diff --git a/lib/matplotlib/text.py b/lib/matplotlib/text.py
+index 4591316cf9..6bcb06506f 100644
+--- a/lib/matplotlib/text.py
++++ b/lib/matplotlib/text.py
+@@ -98,9 +98,6 @@ class Text(Artist):
+     zorder = 3
+     _charsize_cache = dict()
+ 
+-    def __repr__(self):
+-        return f"Text({self._x}, {self._y}, {self._text!r})"
+-
+     def __init__(self,
+                  x=0, y=0, text='', *,
+                  color=None,           # defaults to rc params
+@@ -119,22 +116,19 @@ class Text(Artist):
+                  ):
+         """
+         Create a `.Text` instance at *x*, *y* with string *text*.
+-
+         The text is aligned relative to the anchor point (*x*, *y*) according
+         to ``horizontalalignment`` (default: 'left') and ``verticalalignment``
+         (default: 'bottom'). See also
+         :doc:`/gallery/text_labels_and_annotations/text_alignment`.
+-
+         While Text accepts the 'label' keyword argument, by default it is not
+         added to the handles of a legend.
+-
+         Valid keyword arguments are:
+-
+         %(Text:kwdoc)s
+         """
+         super().__init__()
+         self._x, self._y = x, y
+         self._text = ''
++        self._antialiased = None  # default: defer to rcParams, settable per instance
+         self._reset_visual_defaults(
+             text=text,
+             color=color,
+@@ -151,6 +145,19 @@ class Text(Artist):
+             rotation_mode=rotation_mode,
+         )
+         self.update(kwargs)
++        if 'antialiased' in kwargs:
++            self.set_antialiased(kwargs['antialiased'])
++
++    def get_antialiased(self):
++        """Return whether antialiasing is used for drawing, or None (auto/rcParams)."""
++        return self._antialiased
++
++    def set_antialiased(self, aa):
++        """Set whether to use antialiased rendering: True/False, or None for rcParams default."""
++        if aa is not None and not isinstance(aa, bool):
++            raise ValueError("antialiased must be a bool or None")
++        self._antialiased = aa
++        self.stale = True
+ 
+     def _reset_visual_defaults(
+         self,
+@@ -198,6 +205,8 @@ class Text(Artist):
+             self.set_fontproperties(fontproperties)
+         # Update bbox last, as it depends on font properties.
+         bbox = kwargs.pop("bbox", sentinel)
++        if 'antialiased' in kwargs:
++            self.set_antialiased(kwargs.pop('antialiased'))
+         super().update(kwargs)
+         if bbox is not sentinel:
+             self.set_bbox(bbox)
+@@ -1092,16 +1101,15 @@ class Text(Artist):
+ 
+     def set_math_fontfamily(self, fontfamily):
+         """
+-        Set the font family for math text rendered by Matplotlib.
++Set the font family for math text rendered by Matplotlib.
+ 
+-        This does only affect Matplotlib's own math renderer. It has no effect
++        # This does only affect Matplotlib's own math renderer. It has no effect
+         when rendering with TeX (``usetex=True``).
+ 
+         Parameters
+         ----------
+         fontfamily : str
+             The name of the font family.
+-
+             Available font families are defined in the
+             :ref:`default matplotlibrc file
+             <customizing-with-matplotlibrc-files>`.
+@@ -1818,6 +1826,8 @@ or callable, default: value of *xycoords*
+ 
+         # Must come last, as some kwargs may be propagated to arrow_patch.
+         Text.__init__(self, x, y, text, **kwargs)
++        if 'antialiased' in kwargs:
++            self.set_antialiased(kwargs['antialiased'])
+ 
+     @_api.rename_parameter("3.8", "event", "mouseevent")
+     def contains(self, mouseevent):
+

@@ -1,0 +1,67 @@
+diff --git a/sympy/printing/pycode.py b/sympy/printing/pycode.py
+index 9cac9b5f84..d4b8045a3d 100644
+--- a/sympy/printing/pycode.py
++++ b/sympy/printing/pycode.py
+@@ -210,6 +210,14 @@ def _print_MatrixBase(self, expr):
+         _print_ImmutableDenseMatrix = \
+         lambda self, expr: self._print_MatrixBase(expr)
+ 
++    def _print_Symbol(self, expr):
++        name = super(PythonCodePrinter, self)._print_Symbol(expr)
++        if name not in self.symbols:
++            self.symbols.add(name)
++            self.module_imports['sympy'].add('Symbol')
++        return name
++
++
+ 
+ for k in PythonCodePrinter._kf:
+     setattr(PythonCodePrinter, '_print_%s' % k, _print_known_func)
+diff --git a/sympy/printing/python.py b/sympy/printing/python.py
+index dc6d8ffe59..f6083a98bb 100644
+--- a/sympy/printing/python.py
++++ b/sympy/printing/python.py
+@@ -28,6 +28,10 @@ def __init__(self, settings=None):
+             f = getattr(StrPrinter, f_name)
+             setattr(PythonPrinter, f_name, f)
+ 
++
++    def _print_Equality(self, expr):
++        return 'Eq(%s, %s)' % (self._print(expr.lhs), self._print(expr.rhs))
++
+     def _print_Function(self, expr):
+         func = expr.func.__name__
+         if not hasattr(sympy, func) and not func in self.functions:
+diff --git a/sympy/printing/str.py b/sympy/printing/str.py
+index cc1d19fcce..cff6fdaae7 100644
+--- a/sympy/printing/str.py
++++ b/sympy/printing/str.py
+@@ -216,9 +216,9 @@ def _print_LatticeOp(self, expr):
+     def _print_Limit(self, expr):
+         e, z, z0, dir = expr.args
+         if str(dir) == "+":
+-            return "Limit(%s, %s, %s)" % (e, z, z0)
++            return "Limit(%s, %s, %s)" % (self._print(e), self._print(z), self._print(z0))
+         else:
+-            return "Limit(%s, %s, %s, dir='%s')" % (e, z, z0, dir)
++            return "Limit(%s, %s, %s, dir='%s')" % (self._print(e), self._print(z), self._print(z0), self._print(dir))
+ 
+     def _print_list(self, expr):
+         return "[%s]" % self.stringify(expr, ", ")
+@@ -582,6 +582,16 @@ def _print_PythonRational(self, expr):
+         else:
+             return "%d/%d" % (expr.p, expr.q)
+ 
++
++    def _print_Relational(self, expr):
++        # Eq is a special case
++        if expr.__class__.__name__ == 'Equality':
++            name = 'Eq'
++        else:
++            name = expr.__class__.__name__
++        return '%s(%s, %s)' % (name, self._print(expr.lhs), self._print(expr.rhs))
++
++    _print_Equality = _print_Relational
+     def _print_Fraction(self, expr):
+         if expr.denominator == 1:
+             return str(expr.numerator)

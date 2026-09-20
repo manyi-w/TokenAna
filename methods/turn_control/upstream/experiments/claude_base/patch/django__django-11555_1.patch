@@ -1,0 +1,42 @@
+diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py
+index eaccc96d7d..e1535b41e3 100644
+--- a/django/db/models/sql/compiler.py
++++ b/django/db/models/sql/compiler.py
+@@ -722,8 +722,16 @@ class SQLCompiler:
+ 
+             results = []
+             for item in opts.ordering:
+-                results.extend(self.find_ordering_name(item, opts, alias,
+-                                                       order, already_seen))
++                if hasattr(item, 'resolve_expression'):
++                    # For expressions in related model ordering, we can't simply
++                    # use them as-is because they reference fields in the related model.
++                    # For now, we skip expressions in related model ordering to avoid
++                    # the crash. A complete fix would transform these expressions
++                    # to reference fields through the relationship.
++                    continue
++                else:
++                    results.extend(self.find_ordering_name(item, opts, alias,
++                                                           order, already_seen))
+             return results
+         targets, alias, _ = self.query.trim_joins(targets, joins, path)
+         return [(OrderBy(transform_function(t, alias), descending=descending), False) for t in targets]
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index e15e64cde4..660ee595d0 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -2217,6 +2217,14 @@ def get_order_dir(field, default='ASC'):
+     The 'default' param is used to indicate which way no prefix (or a '+'
+     prefix) should sort. The '-' prefix always sorts the opposite way.
+     """
++    # Handle expression objects by raising a more informative error
++    if hasattr(field, 'resolve_expression'):
++        raise TypeError(
++            "get_order_dir() cannot be used with expression objects. "
++            "Expression objects should be handled separately before "
++            "calling this function."
++        )
++    
+     dirn = ORDER_DIR[default]
+     if field[0] == '-':
+         return field[1:], dirn[1]

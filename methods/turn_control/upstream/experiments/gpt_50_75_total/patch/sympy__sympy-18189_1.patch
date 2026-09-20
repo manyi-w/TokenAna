@@ -1,0 +1,44 @@
+diff --git a/sympy/solvers/diophantine.py b/sympy/solvers/diophantine.py
+index 6092e35dab..e667686cbc 100644
+--- a/sympy/solvers/diophantine.py
++++ b/sympy/solvers/diophantine.py
+@@ -179,10 +179,19 @@ def diophantine(eq, param=symbols("t", integer=True), syms=None,
+                 raise TypeError(
+                     'syms should be given as a sequence, e.g. a list')
+             syms = [i for i in syms if i in var]
+-            if syms != var:
+-                dict_sym_index = dict(zip(syms, range(len(syms))))
+-                return {tuple([t[dict_sym_index[i]] for i in var])
+-                            for t in diophantine(eq, param)}
++            if set(syms) == set(var) and tuple(syms) != tuple(var):
++                # Only reorder at the end, not by recursion, to avoid loss of permuted solutions
++                reordered = True
++            else:
++                reordered = False
++            orig_syms = syms
++            var_syms = var[:]
++        else:
++            reordered = False
++            orig_syms = var[:]
++            var_syms = var[:]
++        n, d = eq.as_numer_denom()
++
+         n, d = eq.as_numer_denom()
+         if n.is_number:
+             return set()
+@@ -199,6 +208,15 @@ def diophantine(eq, param=symbols("t", integer=True), syms=None,
+         assert not any(g.is_number for g in p.gens)
+         eq = p.as_expr()
+         assert eq.is_polynomial()
++        # --- after main solve, apply permutation and sign logic (copied from below)
++        # This block is for when we need to reorder the results at the end.
++        # Run the rest of the function as usual, then reorder
++        if reordered:
++            sols = diophantine(eq, param, syms=var_syms, permute=permute)
++            # Map solutions from var_syms order to orig_syms
++            idx_map = [var_syms.index(s) for s in orig_syms]
++            return {tuple(sol[i] for i in idx_map) for sol in sols}
++
+     except (GeneratorsNeeded, AssertionError, AttributeError):
+         raise TypeError(filldedent('''
+     Equation should be a polynomial with Rational coefficients.'''))

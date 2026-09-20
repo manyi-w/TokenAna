@@ -1,0 +1,124 @@
+diff --git a/sympy/combinatorics/permutations.py b/sympy/combinatorics/permutations.py
+index 4ac1c2ef3b..0202e28c3a 100644
+--- a/sympy/combinatorics/permutations.py
++++ b/sympy/combinatorics/permutations.py
+@@ -848,6 +848,12 @@ def __new__(cls, *args, **kwargs):
+         if size is not None:
+             size = int(size)
+ 
++        # Provide default __init__ that does nothing, for easier subclassing
++        # and to support cooperative multiple inheritance.
++        # This will make `super().__init__` safe for subclasses.
++        # This pattern is used in other sympy classes inheriting from Basic.
++        # See sympy/core/basic.py for reference.
++
+         #a) ()
+         #b) (1) = identity
+         #c) (1, 2) = cycle
+@@ -857,9 +863,9 @@ def __new__(cls, *args, **kwargs):
+         #g) (Permutation) = adjust size or return copy
+         ok = True
+         if not args:  # a
+-            return _af_new(list(range(size or 0)))
++            return cls._af_new(list(range(size or 0)))
+         elif len(args) > 1:  # c
+-            return _af_new(Cycle(*args).list(size))
++            return cls._af_new(Cycle(*args).list(size))
+         if len(args) == 1:
+             a = args[0]
+             if isinstance(a, Perm):  # g
+@@ -867,9 +873,9 @@ def __new__(cls, *args, **kwargs):
+                     return a
+                 return Perm(a.array_form, size=size)
+             if isinstance(a, Cycle):  # f
+-                return _af_new(a.list(size))
++                return cls._af_new(a.list(size))
+             if not is_sequence(a):  # b
+-                return _af_new(list(range(a + 1)))
++                return cls._af_new(list(range(a + 1)))
+             if has_variety(is_sequence(ai) for ai in a):
+                 ok = False
+         else:
+@@ -924,8 +930,8 @@ def __new__(cls, *args, **kwargs):
+         obj._size = size
+         return obj
+ 
+-    @staticmethod
+-    def _af_new(perm):
++    @classmethod
++    def _af_new(cls, perm):
+         """A method to produce a Permutation object from a list;
+         the list is bound to the _array_form attribute, so it must
+         not be modified; this method is meant for internal use only;
+@@ -943,16 +949,15 @@ def _af_new(perm):
+         >>> p
+         Permutation([2, 1, 3, 0])
+ 
++
+         """
+-        p = Basic.__new__(Perm, perm)
++        p = Basic.__new__(cls, perm)
+         p._array_form = perm
+         p._size = len(perm)
+         return p
+ 
+-    def _hashable_content(self):
+-        # the array_form (a list) is the Permutation arg, so we need to
+-        # return a tuple, instead
+-        return tuple(self.array_form)
++    def __hash__(self):
++        return hash(tuple(self.array_form))
+ 
+     @property
+     def array_form(self):
+@@ -991,13 +996,14 @@ def __repr__(self):
+             s = self.support()
+             if not s:
+                 if self.size < 5:
+-                    return 'Permutation(%s)' % str(self.array_form)
++                    return 'Permutation([], size=%s)' % self.size
++
+                 return 'Permutation([], size=%s)' % self.size
+-            trim = str(self.array_form[:s[-1] + 1]) + ', size=%s' % self.size
+-            use = full = str(self.array_form)
+-            if len(trim) < len(full):
+-                use = trim
+-            return 'Permutation(%s)' % use
++    def __eq__(self, other):
++        # Equal if both are Permutation or subclasses and arrays match
++        if not isinstance(other, Permutation):
++            return False
++        return self.array_form == other.array_form
+ 
+     def list(self, size=None):
+         """Return the permutation as an explicit list, possibly
+@@ -1298,9 +1304,10 @@ def __mul__(self, other):
+         if not b:
+             perm = a
+         else:
++            b = b[:]
+             b.extend(list(range(len(b), len(a))))
+             perm = [b[i] for i in a] + b[len(a):]
+-        return _af_new(perm)
++        return self.__class__._af_new(perm)
+ 
+     def commutes_with(self, other):
+         """
+@@ -1341,7 +1348,7 @@ def __pow__(self, n):
+             raise NotImplementedError(
+                 'p**p is not defined; do you mean p^p (conjugate)?')
+         n = int(n)
+-        return _af_new(_af_pow(self.array_form, n))
++        return self.__class__._af_new(_af_pow(self.array_form, n))
+ 
+     def __rxor__(self, i):
+         """Return self(i) when ``i`` is an int.
+@@ -1436,7 +1443,7 @@ def __xor__(self, h):
+         p = self._array_form
+         for i in range(self.size):
+             a[h[i]] = h[p[i]]
+-        return _af_new(a)
++        return self.__class__._af_new(a)
+ 
+     def transpositions(self):
+         """

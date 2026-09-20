@@ -1,0 +1,29 @@
+diff --git a/django/db/models/query.py b/django/db/models/query.py
+index 5c78c6e315..fef63765c7 100644
+--- a/django/db/models/query.py
++++ b/django/db/models/query.py
+@@ -991,6 +991,24 @@ class QuerySet:
+         query.add_update_values(kwargs)
+         # Clear any annotations so that they won't be present in subqueries.
+         query.annotations = {}
++        # PATCH: For multi-table/multi-inheritance, restrict related_updates to relevant PKs only.
++        if getattr(query, "related_updates", None):
++            # Determine correct PKs to update in the related tables
++            child_model = self.model
++            base_qs = self
++            for parent_model in query.related_updates.keys():
++                parent_link_field = None
++                # Find the automatic OneToOneField linking child to parent
++                for f in child_model._meta.get_fields(include_hidden=True):
++                    if f.is_relation and f.related_model is parent_model and f.one_to_one and f.auto_created:
++                        parent_link_field = f
++                        break
++                if parent_link_field is not None:
++                    parent_link_attname = parent_link_field.attname
++                    related_ids = list(base_qs.values_list(parent_link_attname, flat=True))
++                    if not hasattr(query, 'related_ids') or query.related_ids is None:
++                        query.related_ids = set()
++                    query.related_ids = set(related_ids)
+         with transaction.mark_for_rollback_on_error(using=self.db):
+             rows = query.get_compiler(self.db).execute_sql(CURSOR)
+         self._result_cache = None

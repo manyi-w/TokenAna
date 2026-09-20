@@ -1,0 +1,45 @@
+diff --git a/django/db/models/expressions.py b/django/db/models/expressions.py
+index d913658291..b639268b21 100644
+--- a/django/db/models/expressions.py
++++ b/django/db/models/expressions.py
+@@ -290,14 +290,36 @@ class BaseExpression:
+         fields of all source fields match then, simply infer the same type
+         here. This isn't always correct, but it makes sense most of the time.
+ 
+-        Consider the difference between `2 + 2` and `2 / 3`. Inferring
+-        the type here is a convenience for the common case. The user should
+-        supply their own output_field with more complex computations.
++        Special case: subtraction of two temporal fields (DateTimeField, DateField, TimeField)
++        should yield a DurationField.
+ 
+         If a source's output field resolves to None, exclude it from this check.
+         If all sources are None, then an error is raised higher up the stack in
+         the output_field property.
+         """
++
++        # Special case for temporal subtraction
++        if (
++            isinstance(self, CombinedExpression) and
++            getattr(self, 'connector', None) == self.SUB and
++            hasattr(self, 'lhs') and hasattr(self, 'rhs')
++        ):
++            lhs_field = getattr(self.lhs, '_output_field_or_none', None)
++            rhs_field = getattr(self.rhs, '_output_field_or_none', None)
++            temporal_types = (
++                fields.DateTimeField,
++                fields.DateField,
++                fields.TimeField,
++            )
++            if (
++                lhs_field is not None and
++                rhs_field is not None and
++                isinstance(lhs_field, temporal_types) and
++                isinstance(rhs_field, temporal_types) and
++                lhs_field.__class__ == rhs_field.__class__
++            ):
++                return fields.DurationField()
++
+         sources_iter = (source for source in self.get_source_fields() if source is not None)
+         for output_field in sources_iter:
+             for source in sources_iter:
+

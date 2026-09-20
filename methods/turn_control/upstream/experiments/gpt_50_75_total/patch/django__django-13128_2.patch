@@ -1,0 +1,34 @@
+diff --git a/django/db/models/expressions.py b/django/db/models/expressions.py
+index d913658291..b5b3f28646 100644
+--- a/django/db/models/expressions.py
++++ b/django/db/models/expressions.py
+@@ -425,6 +425,28 @@ class Expression(BaseExpression, Combinable):
+ class CombinedExpression(SQLiteNumericMixin, Expression):
+ 
+     def __init__(self, lhs, connector, rhs, output_field=None):
++        # Infer output_field if not provided, for temporal fields
++        if output_field is None:
++            lhs_of = getattr(lhs, 'output_field', None)
++            rhs_of = getattr(rhs, 'output_field', None)
++            lhs_type = lhs_of.get_internal_type() if lhs_of else None
++            rhs_type = rhs_of.get_internal_type() if rhs_of else None
++            # DateTime - DateTime, Date - Date, Time - Time -> Duration
++            if connector == self.SUB and lhs_type == rhs_type and lhs_type in {"DateTimeField", "DateField", "TimeField"}:
++                output_field = fields.DurationField()
++            # Duration + Duration -> Duration
++            elif connector == self.ADD and lhs_type == "DurationField" and rhs_type == "DurationField":
++                output_field = fields.DurationField()
++            # DateTime/Date/Time + Duration OR Duration + DateTime/Date/Time -> left/right type
++            elif connector == self.ADD:
++                if lhs_type in {"DateTimeField", "DateField", "TimeField"} and rhs_type == "DurationField":
++                    output_field = lhs_of
++                elif rhs_type in {"DateTimeField", "DateField", "TimeField"} and lhs_type == "DurationField":
++                    output_field = rhs_of
++            # DateTime/Date/Time - Duration -> same left type
++            elif connector == self.SUB:
++                if lhs_type in {"DateTimeField", "DateField", "TimeField"} and rhs_type == "DurationField":
++                    output_field = lhs_of
+         super().__init__(output_field=output_field)
+         self.connector = connector
+         self.lhs = lhs
+

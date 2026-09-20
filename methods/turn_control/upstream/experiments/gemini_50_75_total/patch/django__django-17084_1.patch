@@ -1,0 +1,34 @@
+diff --git a/django/db/models/aggregates.py b/django/db/models/aggregates.py
+index a778cd413b..5e4f0d4051 100644
+--- a/django/db/models/aggregates.py
++++ b/django/db/models/aggregates.py
+@@ -61,6 +61,14 @@ class Aggregate(Func):
+         self, query=None, allow_joins=True, reuse=None, summarize=False, for_save=False
+     ):
+         # Aggregates are not allowed in UPDATE queries, so ignore for_save
++        if summarize:
++            for expr in self.get_source_expressions():
++                if not hasattr(expr, "name"):
++                    continue
++                annotation = query.annotations.get(expr.name)
++                if annotation and annotation.contains_over_clause:
++                    query.subquery = True
++                    break
+         c = super().resolve_expression(query, allow_joins, reuse, summarize)
+         c.filter = c.filter and c.filter.resolve_expression(
+             query, allow_joins, reuse, summarize
+@@ -68,10 +76,13 @@ class Aggregate(Func):
+         if summarize:
+             # Summarized aggregates cannot refer to summarized aggregates.
+             for ref in c.get_refs():
+-                if query.annotations[ref].is_summary:
++                annotation = query.annotations[ref]
++                if annotation.is_summary:
+                     raise FieldError(
+                         f"Cannot compute {c.name}('{ref}'): '{ref}' is an aggregate"
+                     )
++                if annotation.contains_over_clause:
++                    query.subquery = True
+         elif not self.is_summary:
+             # Call Aggregate.get_source_expressions() to avoid
+             # returning self.filter and including that in this loop.

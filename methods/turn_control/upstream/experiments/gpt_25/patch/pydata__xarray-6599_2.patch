@@ -1,0 +1,38 @@
+diff --git a/xarray/core/computation.py b/xarray/core/computation.py
+index 823cbe02..89e3cd20 100644
+--- a/xarray/core/computation.py
++++ b/xarray/core/computation.py
+@@ -1914,6 +1914,12 @@ def polyval(
+         res *= coord
+         res += coeffs.isel({degree_dim: deg}, drop=True)
+ 
++    # Reorder dims to match (coord.dims..., remaining coeffs dims...)
++    desired_dims = coord.dims + tuple(
++        d for d in res.dims if d not in coord.dims
++    )
++    if res.dims != desired_dims:
++        res = res.transpose(*desired_dims)
+     return res
+ 
+ 
+@@ -1933,7 +1939,7 @@ def _ensure_numeric(data: T_Xarray) -> T_Xarray:
+     from .dataset import Dataset
+ 
+     def to_floatable(x: DataArray) -> DataArray:
+-        if x.dtype.kind in "mM":
++        if x.dtype.kind == "M":  # datetime64
+             return x.copy(
+                 data=datetime_to_numeric(
+                     x.data,
+@@ -1941,6 +1947,10 @@ def _ensure_numeric(data: T_Xarray) -> T_Xarray:
+                     datetime_unit="ns",
+                 ),
+             )
++        elif x.dtype.kind == "m":  # timedelta64
++            # Convert to float64 seconds (to match legacy polynomial convention)
++            data = x.data.astype("timedelta64[ns]").astype(np.float64) / 1e9
++            return x.copy(data=data)
+         return x
+ 
+     if isinstance(data, Dataset):
+

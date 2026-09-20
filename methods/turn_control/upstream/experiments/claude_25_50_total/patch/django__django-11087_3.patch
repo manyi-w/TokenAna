@@ -1,0 +1,49 @@
+diff --git a/django/db/models/deletion.py b/django/db/models/deletion.py
+index 3a462f1c4c..7c47b0c018 100644
+--- a/django/db/models/deletion.py
++++ b/django/db/models/deletion.py
+@@ -232,9 +232,42 @@ class Collector:
+         """
+         Get a QuerySet of objects related to `objs` via the relation `related`.
+         """
+-        return related.related_model._base_manager.using(self.using).filter(
++        qs = related.related_model._base_manager.using(self.using).filter(
+             **{"%s__in" % related.field.name: objs}
+         )
++        
++        # Optimize by only selecting required fields for deletion operations.
++        # We need the primary key for deletion, and we may need other fields
++        # for signals or field updates. However, if no signals are registered
++        # and no field updates are needed, we can optimize to fetch only the pk.
++        model = related.related_model
++        pk_field = model._meta.pk
++        
++        # Check if signals are registered for this model
++        has_signals = (
++            signals.pre_delete.has_listeners(model) or
++            signals.post_delete.has_listeners(model) or
++            signals.m2m_changed.has_listeners(model)
++        )
++        
++        # If no signals are registered, we can optimize to only fetch the primary key
++        # and foreign key fields that might be needed for further cascade operations
++        if not has_signals:
++            # Get all foreign key fields that might be involved in further cascades
++            fk_fields = []
++            for field in model._meta.get_fields():
++                if field.is_relation and hasattr(field, 'related_model'):
++                    if hasattr(field, 'attname'):  # Forward FK
++                        fk_fields.append(field.attname)
++                    elif hasattr(field, 'name'):  # Could be reverse relation - we still need the FK field
++                        # For reverse relations, the FK is on the related model, not this one
++                        pass
++            
++            # Only select pk and foreign key fields
++            select_fields = [pk_field.attname] + fk_fields
++            qs = qs.only(*select_fields)
++        
++        return qs
+ 
+     def instances_with_model(self):
+         for model, instances in self.data.items():
+

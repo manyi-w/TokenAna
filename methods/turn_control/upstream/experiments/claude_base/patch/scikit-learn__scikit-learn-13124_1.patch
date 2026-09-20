@@ -1,0 +1,35 @@
+diff --git a/sklearn/model_selection/_split.py b/sklearn/model_selection/_split.py
+index 24394f869..955342c3a 100644
+--- a/sklearn/model_selection/_split.py
++++ b/sklearn/model_selection/_split.py
+@@ -651,10 +651,25 @@ class StratifiedKFold(_BaseKFold):
+         # NOTE: Passing the data corresponding to ith class say X[y==class_i]
+         # will break when the data is not 100% stratifiable for all classes.
+         # So we pass np.zeroes(max(c, n_splits)) as data to the KFold
+-        per_cls_cvs = [
+-            KFold(self.n_splits, shuffle=self.shuffle,
+-                  random_state=rng).split(np.zeros(max(count, self.n_splits)))
+-            for count in y_counts]
++        per_cls_cvs = []
++        if self.shuffle:
++            # When shuffling, create independent random states for each class
++            # to ensure samples from different classes are paired randomly
++            rng_state = check_random_state(rng)
++            
++        for i, count in enumerate(y_counts):
++            if self.shuffle:
++                if rng is not None:
++                    # Generate a different seed for each class to ensure they are shuffled independently
++                    cls_random_state = rng_state.randint(0, np.iinfo(np.int32).max)
++                else:
++                    cls_random_state = None
++            else:
++                cls_random_state = rng
++            
++            cv = KFold(self.n_splits, shuffle=self.shuffle,
++                      random_state=cls_random_state).split(np.zeros(max(count, self.n_splits)))
++            per_cls_cvs.append(cv)
+ 
+         test_folds = np.zeros(n_samples, dtype=np.int)
+         for test_fold_indices, per_cls_splits in enumerate(zip(*per_cls_cvs)):
+

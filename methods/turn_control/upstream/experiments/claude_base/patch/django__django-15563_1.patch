@@ -1,0 +1,91 @@
+diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py
+index 59a5d6abbb..ec18bf2bda 100644
+--- a/django/db/models/sql/compiler.py
++++ b/django/db/models/sql/compiler.py
+@@ -1855,6 +1855,28 @@ class SQLUpdateCompiler(SQLCompiler):
+                 idents.extend(r[0] for r in rows)
+             self.query.add_filter("pk__in", idents)
+             self.query.related_ids = idents
++            
++            # For multiple inheritance, also collect parent-specific IDs
++            if hasattr(self.query, 'parent_ids') and self.query.related_updates:
++                for parent_model in self.query.related_updates.keys():
++                    # Find the parent link field for this model
++                    parent_link_field = None
++                    for pm, link_field in self.query.get_meta().parents.items():
++                        if pm._meta.concrete_model is parent_model:
++                            parent_link_field = link_field
++                            break
++                    
++                    if parent_link_field is not None:
++                        # Create a query to get the parent IDs
++                        parent_query = query.clone()
++                        parent_query.clear_select_clause()
++                        parent_query.add_fields([parent_link_field.attname])
++                        
++                        parent_ids = []
++                        for rows in parent_query.get_compiler(self.using).execute_sql(MULTI):
++                            parent_ids.extend(r[0] for r in rows)
++                        
++                        self.query.parent_ids[parent_model] = parent_ids
+         else:
+             # The fast path. Filters and updates in one query.
+             self.query.add_filter("pk__in", query)
+diff --git a/django/db/models/sql/subqueries.py b/django/db/models/sql/subqueries.py
+index 04063f73bc..f9ac2137d2 100644
+--- a/django/db/models/sql/subqueries.py
++++ b/django/db/models/sql/subqueries.py
+@@ -3,7 +3,7 @@ Query subclasses which provide extra functionality beyond simple data retrieval.
+ """
+ 
+ from django.core.exceptions import FieldError
+-from django.db.models.sql.constants import CURSOR, GET_ITERATOR_CHUNK_SIZE, NO_RESULTS
++from django.db.models.sql.constants import CURSOR, GET_ITERATOR_CHUNK_SIZE, NO_RESULTS, MULTI
+ from django.db.models.sql.query import Query
+ 
+ __all__ = ["DeleteQuery", "UpdateQuery", "InsertQuery", "AggregateQuery"]
+@@ -62,10 +62,13 @@ class UpdateQuery(Query):
+         self.values = []
+         self.related_ids = None
+         self.related_updates = {}
++        # Store parent-specific IDs for multiple inheritance updates
++        self.parent_ids = {}
+ 
+     def clone(self):
+         obj = super().clone()
+         obj.related_updates = self.related_updates.copy()
++        obj.parent_ids = self.parent_ids.copy()
+         return obj
+ 
+     def update_batch(self, pk_list, values, using):
+@@ -131,11 +134,24 @@ class UpdateQuery(Query):
+             return []
+         result = []
+         for model, values in self.related_updates.items():
+-            query = UpdateQuery(model)
+-            query.values = values
+-            if self.related_ids is not None:
+-                query.add_filter("pk__in", self.related_ids)
+-            result.append(query)
++            # Use pre-computed parent IDs if available, otherwise fall back to related_ids
++            parent_ids = getattr(self, 'parent_ids', {}).get(model)
++            
++            if parent_ids is not None:
++                # Only create the UpdateQuery if there are parent IDs to update
++                if parent_ids:
++                    query = UpdateQuery(model)
++                    query.values = values
++                    query.add_filter("pk__in", parent_ids)
++                    result.append(query)
++                # If parent_ids is empty, skip this update (nothing to update)
++            else:
++                # Fallback to the original behavior
++                query = UpdateQuery(model)
++                query.values = values
++                if self.related_ids is not None:
++                    query.add_filter("pk__in", self.related_ids)
++                result.append(query)
+         return result
+ 
+ 
+

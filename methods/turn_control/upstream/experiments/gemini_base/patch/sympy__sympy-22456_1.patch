@@ -1,0 +1,121 @@
+diff --git a/sympy/codegen/ast.py b/sympy/codegen/ast.py
+index a02714b174..af21e949db 100644
+--- a/sympy/codegen/ast.py
++++ b/sympy/codegen/ast.py
+@@ -872,12 +872,14 @@ def _construct_iterable(cls, itr):
+ class String(Token):
+     """ SymPy object representing a string.
+ 
+-    Atomic object which is not an expression (as opposed to Symbol).
++    This class is used to represent strings in the CCodeGen AST. It is a subclass
++    of ``Basic`` and as such, its arguments are sympified. The string content
++    is stored as a ``Symbol`` in the ``.args`` tuple.
+ 
+     Parameters
+     ==========
+ 
+-    text : str
++    name : str or Symbol
+ 
+     Examples
+     ========
+@@ -885,27 +887,60 @@ class String(Token):
+     >>> from sympy.codegen.ast import String
+     >>> f = String('foo')
+     >>> f
+-    foo
+-    >>> str(f)
++    String('foo')
++    >>> f.name
+     'foo'
+-    >>> f.text
++    >>> str(f)
+     'foo'
+     >>> print(repr(f))
+     String('foo')
++    >>> from sympy.abc import x
++    >>> String(x)
++    String(x)
+ 
+     """
+-    __slots__ = ('text',)
+-    not_in_args = ['text']
+-    is_Atom = True
++    __slots__ = ()
++
++    def __new__(cls, name):
++        from sympy.core.symbol import Symbol
++        if isinstance(name, String):
++            return name
++        elif isinstance(name, str):
++            name = Symbol(name)
++        elif not isinstance(name, Symbol):
++            raise TypeError("String argument must be a string or Symbol, not %s." % type(name).__name__)
++
++        return Basic.__new__(cls, name)
++
++    def __eq__(self, other):
++        if isinstance(other, String):
++            return self.__class__ == other.__class__ and self.name == other.name
++        return super().__eq__(other)
++
++
++    def __hash__(self):
++        return hash((self.__class__, self.name))
+ 
+-    @classmethod
+-    def _construct_text(cls, text):
+-        if not isinstance(text, str):
+-            raise TypeError("Argument text is not a string type.")
+-        return text
++
++    @property
++    def name(self):
++        """ The string content of this String object. """
++        return self.args[0].name
++
++    @property
++    def text(self):
++        """ Deprecated, use .name instead. """
++        return self.name
+ 
+     def _sympystr(self, printer, *args, **kwargs):
+-        return self.text
++        return self.name
++
++    @property
++    def is_Atom(self):
++        return False
++
++    def _sympyrepr(self, printer, *args, **kwargs):
++        return '%s(%r)' % (self.__class__.__name__, self.name)
+ 
+ 
+ class QuotedString(String):
+@@ -1858,6 +1893,10 @@ class FunctionCall(Token, Expr):
+ 
+     """
+     __slots__ = ('name', 'function_args')
+-
+-    _construct_name = String
+-    _construct_function_args = staticmethod(lambda args: Tuple(*args))
++    def __new__(cls, name, function_args=None, **kwargs):
++        if function_args is None:
++            function_args = []
++        if isinstance(name, str):
++            name = String(name)
++        function_args = Tuple(*[sympify(arg) for arg in function_args])
++        return Token.__new__(cls, name, function_args, **kwargs)
+diff --git a/sympy/codegen/cnodes.py b/sympy/codegen/cnodes.py
+index 45b840b6be..71d45cbeef 100644
+--- a/sympy/codegen/cnodes.py
++++ b/sympy/codegen/cnodes.py
+@@ -34,7 +34,7 @@ def sizeof(arg):
+     >>> ccode(sizeof(real))
+     'sizeof(double)'
+     """
+-    return FunctionCall('sizeof', [String(arg) if isinstance(arg, str) else arg])
++    return FunctionCall(String('sizeof'), [String(arg) if isinstance(arg, str) else arg])
+ 
+ 
+ class CommaOperator(Basic):

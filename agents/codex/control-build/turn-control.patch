@@ -1,0 +1,209 @@
+diff --git a/codex-rs/core/Cargo.toml b/codex-rs/core/Cargo.toml
+--- a/codex-rs/core/Cargo.toml
++++ b/codex-rs/core/Cargo.toml
+@@ -10,6 +10,9 @@
+ 
+ [lints]
+ workspace = true
++
++[features]
++tokenana-turn-control = []
+ 
+ [dependencies]
+ anyhow = { workspace = true }
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -259,6 +259,8 @@
+ mod thread_settings;
+ pub(crate) mod time_reminder;
+ mod token_budget;
++#[cfg(feature = "tokenana-turn-control")]
++mod tokenana_control;
+ pub(crate) mod turn;
+ pub(crate) mod turn_context;
+ mod turn_input;
+diff --git a/codex-rs/core/src/context/mod.rs b/codex-rs/core/src/context/mod.rs
+--- a/codex-rs/core/src/context/mod.rs
++++ b/codex-rs/core/src/context/mod.rs
+@@ -1,4 +1,7 @@
+ //! Context fragments injected into model input.
++
++#[cfg(feature = "tokenana-turn-control")]
++pub(crate) mod tokenana_budget;
+ 
+ mod approved_command_prefix_saved;
+ mod apps_instructions;
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -168,6 +168,11 @@
+     prewarmed_client_session: Option<ModelClientSession>,
+     cancellation_token: CancellationToken,
+ ) -> CodexResult<Option<String>> {
++    #[cfg(feature = "tokenana-turn-control")]
++    let mut tokenana_control = super::tokenana_control::Control::open(
++        &turn_context.session_source,
++        &turn_context.sub_id,
++    )?;
+     if crate::guardian::is_basic_session_source(&turn_context.session_source) {
+         crate::guardian::check_pending_guardian_input(&sess, &turn_context).await?;
+     }
+@@ -508,6 +513,18 @@
+             // Keep the override after accepted input so history truncation removes them together.
+             sess.record_reasoning_effort_override(step_context.as_ref())
+                 .await;
++
++            #[cfg(feature = "tokenana-turn-control")]
++            if let Some(control) = tokenana_control.as_mut() {
++                let reminder = control.before_sampling()?;
++                let item = crate::context::ContextualUserFragment::into(reminder);
++                sess.record_conversation_items(
++                    &turn_context,
++                    &step_context.settings.model_info,
++                    std::slice::from_ref(&item),
++                )
++                .await;
++            }
+ 
+             // Construct the input that we will send to the model.
+             let sampling_request_input: Vec<ResponseItem> = async {
+diff --git a/codex-rs/core/src/context/tokenana_budget.rs b/codex-rs/core/src/context/tokenana_budget.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/context/tokenana_budget.rs
+@@ -0,0 +1,30 @@
++use super::ContextualUserFragment;
++use codex_protocol::models::ContentItemKind;
++
++pub(crate) struct TokenanaBudget {
++    pub(crate) used: u32,
++    pub(crate) limit: u32,
++}
++
++impl ContextualUserFragment for TokenanaBudget {
++    fn role(&self) -> &'static str { "developer" }
++
++    fn content_kind(&self) -> ContentItemKind {
++        ContentItemKind("tokenana.remaining_turns".to_string())
++    }
++
++    fn markers(&self) -> (&'static str, &'static str) { Self::type_markers() }
++
++    fn type_markers() -> (&'static str, &'static str) {
++        ("<tokenana_budget>\n", "\n</tokenana_budget>")
++    }
++
++    fn body(&self) -> String {
++        let remaining = self.limit - self.used;
++        format!(
++            "This is main-loop interaction {} of {}. After this interaction, {} remain. \
++             Complete the task within this budget and follow its original submission instructions.",
++            self.used, self.limit, remaining
++        )
++    }
++}
+diff --git a/codex-rs/core/src/session/tokenana_control.rs b/codex-rs/core/src/session/tokenana_control.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/session/tokenana_control.rs
+@@ -0,0 +1,99 @@
++//! Optional control build: one budget for one unattended exec invocation.
++use std::fs::File;
++use std::fs::OpenOptions;
++use std::io::Write;
++use std::path::PathBuf;
++
++use codex_protocol::error::CodexErr;
++use codex_protocol::error::Result as CodexResult;
++use codex_protocol::protocol::SessionSource;
++use serde::Deserialize;
++use serde_json::json;
++
++use crate::context::tokenana_budget::TokenanaBudget;
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Request {
++    version: String,
++    profile: String,
++}
++
++pub(super) struct Control {
++    log: File,
++    used: u32,
++    initial: u32,
++    final_limit: u32,
++    limit: u32,
++    extended: bool,
++}
++
++fn failure(error: impl std::fmt::Display) -> CodexErr {
++    CodexErr::Fatal(format!("TOKENANA_CONTROL_ERROR: {error}"))
++}
++
++impl Control {
++    pub(super) fn open(source: &SessionSource, turn_id: &str) -> CodexResult<Option<Self>> {
++        // Auxiliary sessions inherit the process environment, but never own this budget.
++        if !matches!(source, SessionSource::Exec) {
++            return Ok(None);
++        }
++        let Some(directory) = std::env::var_os("TOKENANA_CONTROL_DIRECTORY") else {
++            return Ok(None);
++        };
++        let directory = PathBuf::from(directory);
++        let request: Request = serde_json::from_reader(
++            File::open(directory.join("control-request.json")).map_err(failure)?,
++        ).map_err(failure)?;
++        if request.version != "codex-sampling-boundary-v1" {
++            return Err(failure("unsupported control request version"));
++        }
++        let (initial, final_limit) = match request.profile.as_str() {
++            "gpt" => (50, 67),
++            "claude" => (52, 64),
++            "gemini" => (29, 45),
++            _ => return Err(failure("unknown budget profile")),
++        };
++        // Refuse a second native turn/restart instead of silently resetting the budget.
++        let log = OpenOptions::new().write(true).create_new(true)
++            .open(directory.join("control-events.jsonl")).map_err(failure)?;
++        let mut control = Self {
++            log, used: 0, initial, final_limit, limit: initial, extended: false,
++        };
++        control.record("initialized", Some(turn_id))?;
++        Ok(Some(control))
++    }
++
++    fn record(&mut self, event: &str, turn_id: Option<&str>) -> CodexResult<()> {
++        let record = json!({
++            "version": "codex-sampling-boundary-v1",
++            "event": event,
++            "turn_id": turn_id,
++            "used_turns": self.used,
++            "initial_budget": self.initial,
++            "final_budget": self.final_limit,
++            "current_budget": self.limit,
++            "extended": self.extended,
++        });
++        serde_json::to_writer(&mut self.log, &record).map_err(failure)?;
++        self.log.write_all(b"\n").map_err(failure)?;
++        self.log.sync_data().map_err(failure)
++    }
++
++    pub(super) fn before_sampling(&mut self) -> CodexResult<TokenanaBudget> {
++        // This is reached only when native completion/stop checks request more work.
++        if self.used == self.limit && !self.extended {
++            self.limit = self.final_limit;
++            self.extended = true;
++            self.record("extended", None)?;
++        }
++        if self.used >= self.limit {
++            self.record("budget_exhausted", None)?;
++            return Err(CodexErr::Fatal("TOKENANA_TURN_BUDGET_EXHAUSTED".to_string()));
++        }
++        self.used += 1;
++        // Persist before dispatch. A failed sampling interaction still consumes a turn.
++        self.record("before_sampling", None)?;
++        Ok(TokenanaBudget { used: self.used, limit: self.limit })
++    }
++}

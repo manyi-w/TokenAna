@@ -1,0 +1,120 @@
+diff --git a/django/db/models/deletion.py b/django/db/models/deletion.py
+index ae82d26340..069667554e 100644
+--- a/django/db/models/deletion.py
++++ b/django/db/models/deletion.py
+@@ -1,9 +1,10 @@
+-from collections import Counter
++from collections import Counter, defaultdict
+ from itertools import chain
+ from operator import attrgetter
+ 
+ from django.db import IntegrityError, connections, transaction
+ from django.db.models import signals, sql
++from django.db.models.query_utils import Q
+ 
+ 
+ class ProtectedError(IntegrityError):
+@@ -280,6 +281,93 @@ class Collector:
+                 return
+         self.data = {model: self.data[model] for model in sorted_models}
+ 
++    def combine_fast_deletes(self):
++        """
++        Combine fast delete QuerySets that target the same model by 
++        creating OR queries to reduce the number of database round trips.
++        """
++        if not self.fast_deletes:
++            return self.fast_deletes
++        
++        # Group fast deletes by model
++        deletes_by_model = defaultdict(list)
++        for qs in self.fast_deletes:
++            deletes_by_model[qs.model].append(qs)
++        
++        combined_deletes = []
++        
++        for model, qs_list in deletes_by_model.items():
++            if len(qs_list) == 1:
++                # Only one QuerySet for this model, no need to combine
++                combined_deletes.append(qs_list[0])
++            else:
++                # Multiple QuerySets for the same model - combine them using Q objects
++                combined_q = Q()
++                
++                # Extract the filter conditions from each QuerySet
++                for qs in qs_list:
++                    # For fast deletes, the query should be a simple IN lookup
++                    # We'll extract the field and values from the WHERE clause
++                    qs_q = self._extract_simple_filter(qs)
++                    if qs_q:
++                        combined_q |= qs_q
++                
++                if combined_q and combined_q.children:
++                    # Create a new QuerySet with the combined filter
++                    combined_qs = model._base_manager.using(self.using).filter(combined_q)
++                    combined_deletes.append(combined_qs)
++                else:
++                    # Fallback to individual QuerySets if combination failed
++                    combined_deletes.extend(qs_list)
++        
++        return combined_deletes
++    
++    def _extract_simple_filter(self, qs):
++        """
++        Extract a simple filter condition from a fast delete QuerySet.
++        Fast deletes typically use simple field__in lookups.
++        """
++        # For fast deletes, we can recreate the query conditions by examining
++        # the related_objects method's result, which creates field__in queries
++        
++        # Get the where clause
++        where = qs.query.where
++        if not where or not hasattr(where, 'children'):
++            return Q()
++        
++        # Fast delete queries should have a simple structure
++        # typically like: field__in=[value1, value2, ...]
++        
++        q = Q()
++        for child in where.children:
++            if hasattr(child, 'lhs') and hasattr(child, 'rhs') and hasattr(child, 'lookup_name'):
++                # Extract the field name from the lhs
++                if hasattr(child.lhs, 'target') and hasattr(child.lhs.target, 'column'):
++                    field_name = child.lhs.target.column
++                elif hasattr(child.lhs, 'output_field') and hasattr(child.lhs.output_field, 'column'):
++                    field_name = child.lhs.output_field.column
++                else:
++                    # Fallback: try to get field name from string representation
++                    field_str = str(child.lhs)
++                    if '.' in field_str:
++                        field_name = field_str.split('.')[-1].strip('"')
++                    else:
++                        continue
++                
++                lookup_name = child.lookup_name
++                value = child.rhs
++                
++                # Create the lookup string
++                lookup = f"{field_name}__{lookup_name}"
++                condition_q = Q(**{lookup: value})
++                
++                if where.connector == 'OR':
++                    q |= condition_q
++                else:  # AND
++                    q &= condition_q
++        
++        return q
++
+     def delete(self):
+         # sort instance collections
+         for model, instances in self.data.items():
+@@ -310,7 +398,8 @@ class Collector:
+                     )
+ 
+             # fast deletes
+-            for qs in self.fast_deletes:
++            combined_fast_deletes = self.combine_fast_deletes()
++            for qs in combined_fast_deletes:
+                 count = qs._raw_delete(using=self.using)
+                 deleted_counter[qs.model._meta.label] += count
+ 

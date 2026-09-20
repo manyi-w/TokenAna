@@ -1,0 +1,37 @@
+diff --git a/django/core/serializers/base.py b/django/core/serializers/base.py
+index da85cb4b92..8723927560 100644
+--- a/django/core/serializers/base.py
++++ b/django/core/serializers/base.py
+@@ -336,13 +336,28 @@ def build_instance(Model, data, db):
+         and hasattr(default_manager, "get_by_natural_key")
+         and hasattr(Model, "natural_key")
+     ):
+-        natural_key = Model(**data).natural_key()
++        # Try to instantiate the model but guard against unresolved FKs (which would be a dict or list)
++        # Do not instantiate Model(**data) with unresolved FKs, as their natural_key() may fail.
++        # Only use this lookup if all FK fields appear to be primitives or None.
+         try:
+-            data[Model._meta.pk.attname] = Model._meta.pk.to_python(
+-                default_manager.db_manager(db).get_by_natural_key(*natural_key).pk
+-            )
++            # Quick defensive check: do not call natural_key if any FK or O2O field is not primitive-like
++            unresolved_fk = False
++            for field in Model._meta.fields:
++                if field.is_relation and field.remote_field:
++                    val = data.get(field.name) or data.get(field.attname)
++                    if isinstance(val, (list, dict)):
++                        unresolved_fk = True
++                        break
++            if not unresolved_fk:
++                natural_key = Model(**data).natural_key()
++                data[Model._meta.pk.attname] = Model._meta.pk.to_python(
++                    default_manager.db_manager(db).get_by_natural_key(*natural_key).pk
++                )
+         except Model.DoesNotExist:
+             pass
++        except Exception:
++            # Catch errors if related objects aren't ready; skip trying the lookup in this pass
++            pass
+     return Model(**data)
+ 
+ 

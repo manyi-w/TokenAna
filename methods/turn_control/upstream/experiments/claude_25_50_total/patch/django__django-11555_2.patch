@@ -1,0 +1,32 @@
+diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py
+index eaccc96d7d..32f317d7dc 100644
+--- a/django/db/models/sql/compiler.py
++++ b/django/db/models/sql/compiler.py
+@@ -704,6 +704,26 @@ class SQLCompiler:
+         not be) and column name for ordering by the given 'name' parameter.
+         The 'name' is of the form 'field1__field2__...__fieldN'.
+         """
++        # Handle expression objects (like OrderBy, F, etc.) that can't be processed by get_order_dir
++        if hasattr(name, 'resolve_expression'):
++            # For expressions, we need to resolve them in the context of the opts model
++            # and return as-is since they already contain their ordering information
++            if not isinstance(name, OrderBy):
++                # Convert non-OrderBy expressions to OrderBy with default ordering
++                name = name.asc() if default_order == 'ASC' else name.desc()
++            if default_order == 'DESC':
++                # If the default order is DESC, we might need to reverse the expression
++                # This handles the case where standard_ordering is False
++                if not name.descending:
++                    name = name.copy()
++                    name.reverse_ordering()
++            
++            # Create a temporary query for the opts model to resolve the expression correctly
++            temp_query = Query(opts.model)
++            temp_query.add_annotation(name, alias='__temp_order__')
++            resolved_expr = name.resolve_expression(temp_query, allow_joins=True, reuse=None)
++            return [(resolved_expr, False)]
++        
+         name, order = get_order_dir(name, default_order)
+         descending = order == 'DESC'
+         pieces = name.split(LOOKUP_SEP)
+

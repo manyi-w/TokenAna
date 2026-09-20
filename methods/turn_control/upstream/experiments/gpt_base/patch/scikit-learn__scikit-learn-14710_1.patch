@@ -1,0 +1,71 @@
+diff --git a/sklearn/ensemble/_hist_gradient_boosting/gradient_boosting.py b/sklearn/ensemble/_hist_gradient_boosting/gradient_boosting.py
+index ad6a5a8ca..cf1348ed2 100644
+--- a/sklearn/ensemble/_hist_gradient_boosting/gradient_boosting.py
++++ b/sklearn/ensemble/_hist_gradient_boosting/gradient_boosting.py
+@@ -16,6 +16,8 @@ from ...model_selection import train_test_split
+ from ...preprocessing import LabelEncoder
+ from ._gradient_boosting import _update_raw_predictions
+ from .common import Y_DTYPE, X_DTYPE, X_BINNED_DTYPE
++from typing import Any
++
+ 
+ from .binning import _BinMapper
+ from .grower import TreeGrower
+@@ -46,6 +48,26 @@ class BaseHistGradientBoosting(BaseEstimator, ABC):
+         self.verbose = verbose
+         self.random_state = random_state
+ 
++    def _encode_y(self, y: Any):
++        """Ensure y is encoded suitably for string targets for classifier."""
++        # Only relabel in the classifier, and avoid re-encoding ints/floats
++        if isinstance(self, ClassifierMixin):
++            if y.dtype.kind in {'O', 'U', 'S'}:
++                # Standard label encoding for string/categorical-like labels
++                le = LabelEncoder()
++                yt = le.fit_transform(y)
++                self.classes_ = le.classes_
++                return yt
++            else:
++                # Integral labels
++                self.classes_ = np.unique(y)
++                return y
++        else:
++            return y
++
++        self.verbose = verbose
++        self.random_state = random_state
++
+     def _validate_parameters(self):
+         """Validate parameters passed to __init__.
+ 
+@@ -426,13 +448,28 @@ class BaseHistGradientBoosting(BaseEstimator, ABC):
+ 
+         Scores are computed on validation data or on training data.
+         """
++        # Patch: encode y_true to match predicted labels if needed (string-target fix)
++        if is_classifier(self) and hasattr(self, 'classes_'):
++            if y_small_train.dtype.kind in {'i', 'u', 'f'} and getattr(self, 'classes_', None) is not None and getattr(self.classes_, 'dtype', None) is not None and self.classes_.dtype.kind in {'O', 'U', 'S'}:
++                y_small_train = self.classes_[y_small_train.astype(int)]
++            elif y_small_train.dtype.kind in {'O', 'U', 'S'} and getattr(self, 'classes_', None) is not None and getattr(self.classes_, 'dtype', None) is not None and self.classes_.dtype.kind in {'i', 'u', 'f'}:
++                idx = np.searchsorted(self.classes_, y_small_train)
++                y_small_train = idx
++        
+         self.train_score_.append(
+             self.scorer_(self, X_binned_small_train, y_small_train)
+         )
+ 
+         if self._use_validation_data:
++            y_val_mod = y_val
++            if is_classifier(self) and hasattr(self, 'classes_'):
++                if y_val.dtype.kind in {'i', 'u', 'f'} and getattr(self, 'classes_', None) is not None and getattr(self.classes_, 'dtype', None) is not None and self.classes_.dtype.kind in {'O', 'U', 'S'}:
++                    y_val_mod = self.classes_[y_val.astype(int)]
++                elif y_val.dtype.kind in {'O', 'U', 'S'} and getattr(self, 'classes_', None) is not None and getattr(self.classes_, 'dtype', None) is not None and self.classes_.dtype.kind in {'i', 'u', 'f'}:
++                    idx = np.searchsorted(self.classes_, y_val)
++                    y_val_mod = idx
+             self.validation_score_.append(
+-                self.scorer_(self, X_binned_val, y_val)
++                self.scorer_(self, X_binned_val, y_val_mod)
+             )
+             return self._should_stop(self.validation_score_)
+         else:
+

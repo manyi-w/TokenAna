@@ -1,0 +1,54 @@
+diff --git a/sphinx/ext/inheritance_diagram.py b/sphinx/ext/inheritance_diagram.py
+index 6e3985512..7556fb42a 100644
+--- a/sphinx/ext/inheritance_diagram.py
++++ b/sphinx/ext/inheritance_diagram.py
+@@ -34,6 +34,7 @@ import builtins
+ import hashlib
+ import inspect
+ import re
++import os
+ from collections.abc import Iterable
+ from importlib import import_module
+ from typing import Any, cast
+@@ -406,20 +407,29 @@ def html_visit_inheritance_diagram(self: HTML5Translator, node: inheritance_diag
+     name = 'inheritance%s' % graph_hash
+ 
+     # Create a mapping from fully-qualified class names to URLs.
+-    graphviz_output_format = self.builder.env.config.graphviz_output_format.upper()
+-    current_filename = self.builder.current_docname + self.builder.out_suffix
+     urls = {}
+     pending_xrefs = cast(Iterable[addnodes.pending_xref], node)
+-    for child in pending_xrefs:
+-        if child.get('refuri') is not None:
+-            if graphviz_output_format == 'SVG':
+-                urls[child['reftitle']] = "../" + child.get('refuri')
+-            else:
++    # if the builder does not support relative-path resolution, we need to resolve
++    # the URI relative to the current document
++    if self.builder.config.graphviz_output_format.lower() == 'svg':
++        for child in pending_xrefs:
++            # In the case of SVG output, the links in the generated map are
++            # relative to the generated SVG file.  The correct relative path
++            # can be calculated using the builder's get_relative_uri method,
++            # passing the location of the output file (from_docname) and the
++            # path to the target (to_docname).
++            #
++            # The from_docname is the path to the SVG file, which is in the
++            # builder's imagedir.  We can use a dummy filename since we only
++            # need the directory.
++            from_docname = os.path.join(self.builder.imagedir, 'dummy.svg')
++            urls[child['reftitle']] = self.builder.get_relative_uri(
++                from_docname, child['refdoc']) + '#' + child['reftarget']
++    else:
++        for child in pending_xrefs:
++            if child.get('refuri') is not None:
+                 urls[child['reftitle']] = child.get('refuri')
+-        elif child.get('refid') is not None:
+-            if graphviz_output_format == 'SVG':
+-                urls[child['reftitle']] = '../' + current_filename + '#' + child.get('refid')
+-            else:
++            elif child.get('refid') is not None:
+                 urls[child['reftitle']] = '#' + child.get('refid')
+ 
+     dotcode = graph.generate_dot(name, urls, env=self.builder.env)
+

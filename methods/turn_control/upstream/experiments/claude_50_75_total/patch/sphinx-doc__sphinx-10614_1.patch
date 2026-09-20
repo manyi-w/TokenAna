@@ -1,0 +1,41 @@
+diff --git a/sphinx/ext/inheritance_diagram.py b/sphinx/ext/inheritance_diagram.py
+index 6e3985512..eac83c495 100644
+--- a/sphinx/ext/inheritance_diagram.py
++++ b/sphinx/ext/inheritance_diagram.py
+@@ -410,14 +410,34 @@ def html_visit_inheritance_diagram(self: HTML5Translator, node: inheritance_diag
+     current_filename = self.builder.current_docname + self.builder.out_suffix
+     urls = {}
+     pending_xrefs = cast(Iterable[addnodes.pending_xref], node)
++    
+     for child in pending_xrefs:
+         if child.get('refuri') is not None:
++            refuri = child.get('refuri')
+             if graphviz_output_format == 'SVG':
+-                urls[child['reftitle']] = "../" + child.get('refuri')
++                # For SVG, we need to make URLs relative to the _images directory.
++                # The issue is that refuri is relative to current document, but SVG needs 
++                # URLs relative to _images/ directory.
++                # 
++                # Solution: Convert the relative refuri to absolute, then make it relative to _images/
++                import posixpath
++                # Join current document's directory with the relative refuri to get absolute path
++                current_docdir = posixpath.dirname(self.builder.current_docname)
++                if current_docdir:
++                    absolute_refuri = posixpath.join(current_docdir, refuri)
++                else:
++                    absolute_refuri = refuri
++                
++                # Normalize the path (resolve .. and . components)
++                absolute_refuri = posixpath.normpath(absolute_refuri)
++                
++                # Now make it relative from _images/ directory (which is at root level)
++                urls[child['reftitle']] = "../" + absolute_refuri
+             else:
+-                urls[child['reftitle']] = child.get('refuri')
++                urls[child['reftitle']] = refuri
+         elif child.get('refid') is not None:
+             if graphviz_output_format == 'SVG':
++                # For same-document references in SVG, we still need the full path from _images/
+                 urls[child['reftitle']] = '../' + current_filename + '#' + child.get('refid')
+             else:
+                 urls[child['reftitle']] = '#' + child.get('refid')

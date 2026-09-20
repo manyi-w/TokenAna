@@ -1,0 +1,75 @@
+diff --git a/sphinx/ext/autodoc/__init__.py b/sphinx/ext/autodoc/__init__.py
+index ddfd2b365..7f48e1653 100644
+--- a/sphinx/ext/autodoc/__init__.py
++++ b/sphinx/ext/autodoc/__init__.py
+@@ -598,11 +598,27 @@ class Documenter:
+             attr_docs = self.analyzer.find_attr_docs()
+             if self.objpath:
+                 key = ('.'.join(self.objpath[:-1]), self.objpath[-1])
++                found_docs = None
++                
++                # First, try the current namespace
+                 if key in attr_docs:
++                    found_docs = attr_docs[key]
++                    
++                # If not found and we have a parent class, search in base classes
++                if not found_docs and self.parent and hasattr(self.parent, '__mro__'):
++                    attr_name = self.objpath[-1]
++                    for base_cls in self.parent.__mro__[1:]:  # Skip the class itself
++                        if hasattr(base_cls, '__qualname__'):
++                            base_key = (base_cls.__qualname__, attr_name)
++                            if base_key in attr_docs:
++                                found_docs = attr_docs[base_key]
++                                break
++                
++                if found_docs:
+                     no_docstring = True
+                     # make a copy of docstring for attributes to avoid cache
+                     # the change of autodoc-process-docstring event.
+-                    docstrings = [list(attr_docs[key])]
++                    docstrings = [list(found_docs)]
+ 
+                     for i, line in enumerate(self.process_doc(docstrings)):
+                         self.add_line(line, sourcename, i)
+@@ -767,11 +783,35 @@ class Documenter:
+                 else:
+                     keep = False
+             else:
+-                if self.options.members is ALL and is_filtered_inherited_member(membername):
+-                    keep = False
+-                else:
+-                    # ignore undocumented members if :undoc-members: is not given
+-                    keep = has_doc or self.options.undoc_members
++                # Check if attribute documentation exists in base classes for inherited members
++                found_inherited_attr_doc = False
++                if (self.options.inherited_members and 
++                    self.object and hasattr(self.object, '__mro__') and
++                    not inspect.ismethod(member) and not inspect.isfunction(member) and 
++                    not inspect.isdescriptor(member)):
++                    # Only check for inherited attribute docs for non-callable members
++                    for base_cls in self.object.__mro__[1:]:  # Skip the class itself
++                        if hasattr(base_cls, '__qualname__'):
++                            base_key = (base_cls.__qualname__, membername)
++                            if base_key in attr_docs:
++                                found_inherited_attr_doc = True
++                                if want_all and isprivate:
++                                    if self.options.private_members is None:
++                                        keep = False
++                                    else:
++                                        keep = membername in self.options.private_members
++                                else:
++                                    # keep documented inherited attributes
++                                    keep = True
++                                isattr = True
++                                break
++                
++                if not found_inherited_attr_doc:
++                    if self.options.members is ALL and is_filtered_inherited_member(membername):
++                        keep = False
++                    else:
++                        # ignore undocumented members if :undoc-members: is not given
++                        keep = has_doc or self.options.undoc_members
+ 
+             if isinstance(obj, ObjectMember) and obj.skipped:
+                 # forcedly skipped member (ex. a module attribute not defined in __all__)
+

@@ -1,0 +1,44 @@
+diff --git a/django/db/models/deletion.py b/django/db/models/deletion.py
+index 3a462f1c4c..dad6a8f7f2 100644
+--- a/django/db/models/deletion.py
++++ b/django/db/models/deletion.py
+@@ -232,9 +232,37 @@ class Collector:
+         """
+         Get a QuerySet of objects related to `objs` via the relation `related`.
+         """
+-        return related.related_model._base_manager.using(self.using).filter(
++        # Optimize: only select fields required for deletion (pk and foreign keys)
++        related_model = related.related_model
++        required_fields = []
++        
++        # Always include the primary key
++        pk_field = related_model._meta.pk
++        required_fields.append(pk_field.name)
++        
++        # Include foreign key fields to enable cascade deletion
++        for field in related_model._meta.get_fields():
++            if (hasattr(field, 'remote_field') and field.remote_field and 
++                hasattr(field, 'concrete') and field.concrete):
++                required_fields.append(field.name)
++        
++        # Remove duplicates while preserving order
++        seen = set()
++        unique_fields = []
++        for field in required_fields:
++            if field not in seen:
++                seen.add(field)
++                unique_fields.append(field)
++        
++        base_qs = related_model._base_manager.using(self.using).filter(
+             **{"%s__in" % related.field.name: objs}
+         )
++        
++        # Only apply .only() if we have fields to select, otherwise return base queryset
++        if unique_fields and len(unique_fields) > 0:
++            return base_qs.only(*unique_fields)
++        else:
++            return base_qs
+ 
+     def instances_with_model(self):
+         for model, instances in self.data.items():
+

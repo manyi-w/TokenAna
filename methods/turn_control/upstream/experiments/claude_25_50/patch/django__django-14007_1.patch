@@ -1,0 +1,47 @@
+diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py
+index f02199d97c..9f38bbcfe6 100644
+--- a/django/db/models/sql/compiler.py
++++ b/django/db/models/sql/compiler.py
+@@ -1411,14 +1411,36 @@ class SQLInsertCompiler(SQLCompiler):
+                 cursor.execute(sql, params)
+             if not self.returning_fields:
+                 return []
++            
++            # Get the raw results from the database
+             if self.connection.features.can_return_rows_from_bulk_insert and len(self.query.objs) > 1:
+-                return self.connection.ops.fetch_returned_insert_rows(cursor)
+-            if self.connection.features.can_return_columns_from_insert:
++                results = self.connection.ops.fetch_returned_insert_rows(cursor)
++            elif self.connection.features.can_return_columns_from_insert:
+                 assert len(self.query.objs) == 1
+-                return [self.connection.ops.fetch_returned_insert_columns(cursor, self.returning_params)]
+-            return [(self.connection.ops.last_insert_id(
+-                cursor, self.query.get_meta().db_table, self.query.get_meta().pk.column
+-            ),)]
++                results = [self.connection.ops.fetch_returned_insert_columns(cursor, self.returning_params)]
++            else:
++                results = [(self.connection.ops.last_insert_id(
++                    cursor, self.query.get_meta().db_table, self.query.get_meta().pk.column
++                ),)]
++            
++            # Apply field converters to the returned values
++            if results and self.returning_fields:
++                converted_results = []
++                for row in results:
++                    converted_row = []
++                    for i, value in enumerate(row):
++                        field = self.returning_fields[i]
++                        # Apply field converters (including from_db_value)
++                        # We skip backend converters since returning_fields from inserts
++                        # are plain field objects, not expressions with output_field
++                        field_converters = field.get_db_converters(self.connection)
++                        for converter in field_converters:
++                            value = converter(value, field, self.connection)
++                        converted_row.append(value)
++                    converted_results.append(tuple(converted_row))
++                results = converted_results
++            
++            return results
+ 
+ 
+ class SQLDeleteCompiler(SQLCompiler):

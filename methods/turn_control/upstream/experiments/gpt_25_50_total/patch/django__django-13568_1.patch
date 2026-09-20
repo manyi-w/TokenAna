@@ -1,0 +1,42 @@
+diff --git a/django/contrib/auth/checks.py b/django/contrib/auth/checks.py
+index 65fc266f7e..9a7b554ba7 100644
+--- a/django/contrib/auth/checks.py
++++ b/django/contrib/auth/checks.py
+@@ -51,14 +51,25 @@ def check_user_model(app_configs=None, **kwargs):
+             )
+         )
+ 
+-    # Check that the username field is unique
+-    if not cls._meta.get_field(cls.USERNAME_FIELD).unique:
++    # Check that the username field is unique, either via unique=True or a UniqueConstraint.
++    username_field = cls.USERNAME_FIELD
++    is_unique = cls._meta.get_field(username_field).unique
++
++    # Check for a UniqueConstraint matching only the USERNAME_FIELD.
++    has_unique_constraint = any(
++        (
++            getattr(constraint, 'fields', None) == (username_field,) or getattr(constraint, 'fields', None) == [username_field]
++        ) and constraint.__class__.__name__ == 'UniqueConstraint'
++        for constraint in getattr(cls._meta, 'constraints', [])
++    )
++
++    if not is_unique and not has_unique_constraint:
+         if (settings.AUTHENTICATION_BACKENDS ==
+                 ['django.contrib.auth.backends.ModelBackend']):
+             errors.append(
+                 checks.Error(
+                     "'%s.%s' must be unique because it is named as the 'USERNAME_FIELD'." % (
+-                        cls._meta.object_name, cls.USERNAME_FIELD
++                        cls._meta.object_name, username_field
+                     ),
+                     obj=cls,
+                     id='auth.E003',
+@@ -68,7 +79,7 @@ def check_user_model(app_configs=None, **kwargs):
+             errors.append(
+                 checks.Warning(
+                     "'%s.%s' is named as the 'USERNAME_FIELD', but it is not unique." % (
+-                        cls._meta.object_name, cls.USERNAME_FIELD
++                        cls._meta.object_name, username_field
+                     ),
+                     hint='Ensure that your authentication backend(s) can handle non-unique usernames.',
+                     obj=cls,

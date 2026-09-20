@@ -1,0 +1,53 @@
+diff --git a/sympy/geometry/point.py b/sympy/geometry/point.py
+index 7c978c47be..7108ac60f6 100644
+--- a/sympy/geometry/point.py
++++ b/sympy/geometry/point.py
+@@ -213,14 +213,48 @@ def __add__(self, other):
+         sympy.geometry.point.Point.translate
+ 
+         """
++        from sympy.core.mul import Mul
++        if isinstance(other, Mul):
++            from sympy.core.numbers import Number
++            pts = [a for a in other.args if isinstance(a, Point)]
++            nums = [a for a in other.args if isinstance(a, Number)]
++            if len(pts) == 1 and len(nums) >= 1:
++                other_point = pts[0]
++                number = Mul(*nums)
++                # self + (number * other_point): scale point then add
++                s, o = Point._normalize_dimension(self, other_point * number)
++                coords = [simplify(a + b) for a, b in zip(s, o)]
++                return Point(coords, evaluate=False)
+         try:
+             s, o = Point._normalize_dimension(self, Point(other, evaluate=False))
+         except TypeError:
++            # commutative: try if other supports __radd__ with self
++            if hasattr(other, '__radd__'):
++                result = other.__radd__(self)
++                if result is not NotImplemented:
++                    return result
+             raise GeometryError("Don't know how to add {} and a Point object".format(other))
+ 
+         coords = [simplify(a + b) for a, b in zip(s, o)]
+         return Point(coords, evaluate=False)
+ 
++    def __radd__(self, other):
++        # Support commutative addition: Point + Point or (number * Point) + Point
++        if isinstance(other, Point):
++            # fallback: standard addition, used e.g. for Point(x1, x2).__radd__(Point(y1, y2))
++            return Point([simplify(a + b) for a, b in zip(self.args, other.args)], evaluate=False)
++        from sympy.core.mul import Mul
++        from sympy.core.numbers import Number
++        if getattr(other, 'is_Mul', False):
++            pts = [a for a in other.args if isinstance(a, Point)]
++            nums = [a for a in other.args if isinstance(a, Number)]
++            if len(pts) == 1 and len(nums) >= 1:
++                other_point = pts[0]
++                number = Mul(*nums)
++                return self + other_point * number
++        return NotImplemented
++
++
+     def __contains__(self, item):
+         return item in self.args
+ 

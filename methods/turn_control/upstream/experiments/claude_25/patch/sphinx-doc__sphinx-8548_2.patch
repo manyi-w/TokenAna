@@ -1,0 +1,51 @@
+diff --git a/sphinx/ext/autodoc/__init__.py b/sphinx/ext/autodoc/__init__.py
+index ddfd2b365..175bcaf36 100644
+--- a/sphinx/ext/autodoc/__init__.py
++++ b/sphinx/ext/autodoc/__init__.py
+@@ -598,12 +598,43 @@ class Documenter:
+             attr_docs = self.analyzer.find_attr_docs()
+             if self.objpath:
+                 key = ('.'.join(self.objpath[:-1]), self.objpath[-1])
++                docstrings = None
++                
++                # First, try to find the attribute documentation in the current class
+                 if key in attr_docs:
++                    docstrings = [list(attr_docs[key])]
++                # If not found and inherited-members is enabled, search in base classes
++                elif (hasattr(self.options, 'inherited_members') and 
++                      self.options.inherited_members and 
++                      self.parent and 
++                      hasattr(self.parent, '__mro__')):
++                    
++                    # Search in base classes for the attribute documentation
++                    attr_name = self.objpath[-1]
++                    for base_cls in self.parent.__mro__[1:]:  # Skip the first class (self.parent)
++                        base_key = (base_cls.__name__, attr_name)
++                        if base_key in attr_docs:
++                            docstrings = [list(attr_docs[base_key])]
++                            break
++                        
++                        # Also check if we can get analyzer for the base class module
++                        try:
++                            base_module = base_cls.__module__
++                            if base_module and base_module != self.modname:
++                                # Try to get analyzer for the base class module
++                                base_analyzer = ModuleAnalyzer.for_module(base_module)
++                                base_attr_docs = base_analyzer.find_attr_docs()
++                                if base_key in base_attr_docs:
++                                    docstrings = [list(base_attr_docs[base_key])]
++                                    break
++                        except (ImportError, PycodeError):
++                            # If we can't analyze the base class module, continue
++                            pass
++                
++                if docstrings:
+                     no_docstring = True
+                     # make a copy of docstring for attributes to avoid cache
+                     # the change of autodoc-process-docstring event.
+-                    docstrings = [list(attr_docs[key])]
+-
+                     for i, line in enumerate(self.process_doc(docstrings)):
+                         self.add_line(line, sourcename, i)
+ 
+

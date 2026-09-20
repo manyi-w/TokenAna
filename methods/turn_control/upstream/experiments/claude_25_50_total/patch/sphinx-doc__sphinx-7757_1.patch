@@ -1,0 +1,42 @@
+diff --git a/sphinx/util/inspect.py b/sphinx/util/inspect.py
+index 15f0d66e2..e8007a63f 100644
+--- a/sphinx/util/inspect.py
++++ b/sphinx/util/inspect.py
+@@ -520,15 +520,33 @@ def signature_from_str(signature: str) -> inspect.Signature:
+     args = definition.args
+     params = []
+ 
++    # Defaults in Python AST correspond to the last N parameters where N = len(defaults)
++    # They apply to both positional-only and regular positional arguments combined
++    posonlyargs = getattr(args, "posonlyargs", [])
++    total_positional = len(posonlyargs) + len(args.args)
++    defaults_start_index = total_positional - len(args.defaults) if args.defaults else total_positional
++
+     if hasattr(args, "posonlyargs"):
+-        for arg in args.posonlyargs:  # type: ignore
++        for i, arg in enumerate(args.posonlyargs):  # type: ignore
+             annotation = ast_unparse(arg.annotation) or Parameter.empty
++            
++            # Check if this positional-only argument has a default value
++            if i >= defaults_start_index:
++                default_index = i - defaults_start_index
++                default = ast_unparse(args.defaults[default_index])
++            else:
++                default = Parameter.empty
++                
+             params.append(Parameter(arg.arg, Parameter.POSITIONAL_ONLY,
+-                                    annotation=annotation))
++                                    default=default, annotation=annotation))
+ 
+     for i, arg in enumerate(args.args):
+-        if len(args.args) - i <= len(args.defaults):
+-            default = ast_unparse(args.defaults[-len(args.args) + i])
++        # Calculate the global index of this parameter 
++        global_index = len(posonlyargs) + i
++        
++        if global_index >= defaults_start_index:
++            default_index = global_index - defaults_start_index
++            default = ast_unparse(args.defaults[default_index])
+         else:
+             default = Parameter.empty
+ 

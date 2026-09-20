@@ -1,0 +1,32 @@
+diff --git a/django/core/serializers/base.py b/django/core/serializers/base.py
+index da85cb4b92..b1005f6168 100644
+--- a/django/core/serializers/base.py
++++ b/django/core/serializers/base.py
+@@ -336,7 +336,26 @@ def build_instance(Model, data, db):
+         and hasattr(default_manager, "get_by_natural_key")
+         and hasattr(Model, "natural_key")
+     ):
+-        natural_key = Model(**data).natural_key()
++        obj_data = data.copy()
++        for field in Model._meta.fields:
++            if field.remote_field and field.attname in obj_data:
++                fk_model = field.remote_field.model
++                fk_pk = obj_data.pop(field.attname)
++                if fk_pk is None:
++                    # Can't be a natural key if the FK is null.
++                    continue
++                try:
++                    obj_data[field.name] = fk_model._default_manager.db_manager(
++                        db
++                    ).get(pk=fk_pk)
++                except fk_model.DoesNotExist:
++                    # The related object may not exist in the database yet if
++                    # it's being created in the same batch of objects.
++                    # Deferring the resolution of this object's PK is not
++                    # supported, so punt to the DoesNotExist exception below.
++                    pass
++
++        natural_key = Model(**obj_data).natural_key()
+         try:
+             data[Model._meta.pk.attname] = Model._meta.pk.to_python(
+                 default_manager.db_manager(db).get_by_natural_key(*natural_key).pk

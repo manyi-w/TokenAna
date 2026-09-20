@@ -1,0 +1,36 @@
+diff --git a/django/db/models/sql/subqueries.py b/django/db/models/sql/subqueries.py
+index 04063f73bc..6ca3033c34 100644
+--- a/django/db/models/sql/subqueries.py
++++ b/django/db/models/sql/subqueries.py
+@@ -117,9 +117,30 @@ class UpdateQuery(Query):
+         """
+         Add (name, value) to an update query for an ancestor model.
+ 
+-        Update are coalesced so that only one update query per ancestor is run.
++        Updates are coalesced so that only one update query per ancestor is run.
++        Ensure we only update parent rows which actually belong to current model rows.
+         """
+         self.related_updates.setdefault(model, []).append((field, None, value))
++        # Patch start: ensure only correct parent pks used
++        if self.related_ids is None:
++            # Find parent PKs linked to child objects in this query
++            # Use child queryset to get the corresponding parent PKs
++            child_model = self.get_meta().model
++            parent_pk_name = model._meta.pk.attname
++            child_fk_name = None
++            # Identify the field on child which links to parent
++            for parent in child_model._meta.get_parent_list():
++                if parent is model:
++                    for f in child_model._meta.fields:
++                        if getattr(f, 'parent_link', False) and f.related_model is parent:
++                            child_fk_name = f.name
++                            break
++            if not child_fk_name:
++                # Fallback: look for parent's PK on child
++                child_fk_name = parent_pk_name
++            qs = child_model._default_manager.filter(self.where)
++            parent_ids = list(qs.values_list(child_fk_name, flat=True))
++            self.related_ids = parent_ids
+ 
+     def get_related_updates(self):
+         """

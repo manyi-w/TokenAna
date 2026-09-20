@@ -1,0 +1,55 @@
+diff --git a/django/db/migrations/operations/models.py b/django/db/migrations/operations/models.py
+index c120f5d32d..002c5be2c6 100644
+--- a/django/db/migrations/operations/models.py
++++ b/django/db/migrations/operations/models.py
+@@ -409,7 +409,8 @@ class RenameModel(ModelOperation):
+ 
+ class ModelOptionOperation(ModelOperation):
+     def reduce(self, operation, app_label):
+-        if isinstance(operation, (self.__class__, DeleteModel)) and self.name_lower == operation.name_lower:
++        # If two consecutive AlterXXXTogether operations for the same model, drop the first (keep the last)
++        if isinstance(operation, self.__class__) and self.name_lower == operation.name_lower:
+             return [operation]
+         return super().reduce(operation, app_label)
+ 
+diff --git a/django/db/migrations/optimizer.py b/django/db/migrations/optimizer.py
+index ee20f62af2..6c04dcf880 100644
+--- a/django/db/migrations/optimizer.py
++++ b/django/db/migrations/optimizer.py
+@@ -39,6 +39,35 @@ class MigrationOptimizer:
+ 
+     def optimize_inner(self, operations, app_label):
+         """Inner optimization loop."""
++        # Peephole: collapse CreateModel...DeleteModel (with allowed modifies in between) to nothing
++        i = 0
++        length = len(operations)
++        while i < length:
++            op = operations[i]
++            from django.db.migrations.operations.models import CreateModel, DeleteModel, AlterModelTable, AlterUniqueTogether, AlterIndexTogether, AlterOrderWithRespectTo
++            if isinstance(op, CreateModel):
++                for j in range(i + 1, length):
++                    maybe_del = operations[j]
++                    if (
++                        isinstance(maybe_del, DeleteModel) and
++                        maybe_del.name_lower == op.name_lower
++                    ):
++                        # Only allow certain operations in between
++                        allowed_types = (
++                            AlterModelTable,
++                            AlterUniqueTogether,
++                            AlterIndexTogether,
++                            AlterOrderWithRespectTo
++                        )
++                        if all(
++                            (getattr(operations[k], 'name_lower', None) == op.name_lower and isinstance(operations[k], allowed_types))
++                            for k in range(i + 1, j)
++                        ):
++                            # Drop the whole chain
++                            return operations[:i] + operations[j + 1:]
++                        break
++            i += 1
++
+         new_operations = []
+         for i, operation in enumerate(operations):
+             right = True  # Should we reduce on the right or on the left.
+

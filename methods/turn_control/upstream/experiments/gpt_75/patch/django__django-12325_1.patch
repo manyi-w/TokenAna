@@ -1,0 +1,42 @@
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index 8ea6c05ef9..62c898e8e0 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -193,18 +193,33 @@ class ModelBase(type):
+ 
+         # Collect the parent links for multi-table inheritance.
+         parent_links = {}
++        # Gather all candidates for parent links by model
++        candidate_parent_links = {}
+         for base in reversed([new_class] + parents):
+-            # Conceptually equivalent to `if base is Model`.
+             if not hasattr(base, '_meta'):
+                 continue
+-            # Skip concrete parent classes.
+             if base != new_class and not base._meta.abstract:
+                 continue
+-            # Locate OneToOneField instances.
+             for field in base._meta.local_fields:
+                 if isinstance(field, OneToOneField):
+                     related = resolve_relation(new_class, field.remote_field.model)
+-                    parent_links[make_model_tuple(related)] = field
++                    mtup = make_model_tuple(related)
++                    candidate_parent_links.setdefault(mtup, []).append(field)
++        # Now resolve for each parent: prefer parent_link=True if present, else fallback
++        from django.core.exceptions import ImproperlyConfigured
++        for mtup, fields in candidate_parent_links.items():
++            chosen = None
++            parent_link_fields = [f for f in fields if getattr(f, 'parent_link', False)]
++            if len(parent_link_fields) > 1:
++                raise ImproperlyConfigured(
++                    f"More than one OneToOneField with parent_link=True for parent {mtup}. "
++                    f"Only one such field can exist. Candidates: {[f.name for f in parent_link_fields]}"
++                )
++            if parent_link_fields:
++                chosen = parent_link_fields[0]
++            else:
++                chosen = fields[-1]  # fallback, usually for auto-generated field
++            parent_links[mtup] = chosen
+ 
+         # Track fields inherited from base models.
+         inherited_attributes = set()

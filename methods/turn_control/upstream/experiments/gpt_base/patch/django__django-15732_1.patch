@@ -1,0 +1,45 @@
+diff --git a/django/db/backends/postgresql/schema.py b/django/db/backends/postgresql/schema.py
+index a22ae0094f..b9d397fd63 100644
+--- a/django/db/backends/postgresql/schema.py
++++ b/django/db/backends/postgresql/schema.py
+@@ -297,3 +297,39 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
+             include=include,
+             expressions=expressions,
+         )
++
++    def _delete_composed_index(self, model, fields, constraint_kwargs, sql):
++        """
++        Override to safely drop unique_together constraints on a single field
++        that are redundant with PK or field unique constraints, as PostgreSQL
++        may have both constraints for a single column.
++        """
++        meta_constraint_names = {c.name for c in model._meta.constraints}
++        meta_index_names = {c.name for c in model._meta.indexes}
++        columns = [model._meta.get_field(field).column for field in fields]
++        constraint_names = self._constraint_names(
++            model,
++            columns,
++            exclude=meta_constraint_names | meta_index_names,
++            **constraint_kwargs,
++        )
++
++        # Remove primary key constraint names from list
++        pk_constraint_names = set(self._constraint_names(model, columns, primary_key=True))
++        constraint_names = [name for name in constraint_names if name not in pk_constraint_names]
++
++        # Remove single-column unique constraints that correspond to field.unique=True
++        if len(fields) == 1:
++            field = model._meta.get_field(fields[0])
++            if getattr(field, "unique", False):
++                # Remove unique constraint(s) that match just this column (exclude PK already above)
++                unique_names = set(self._constraint_names(model, columns, unique=True, primary_key=False))
++                constraint_names = [name for name in constraint_names if name not in unique_names]
++
++        if len(constraint_names) != 1:
++            raise ValueError(
++                "Found wrong number (%s) of constraints for %s(%s)" % (
++                    len(constraint_names), model._meta.db_table, ", ".join(columns)
++                )
++            )
++        self.execute(self._delete_constraint_sql(sql, model, constraint_names[0]))
+

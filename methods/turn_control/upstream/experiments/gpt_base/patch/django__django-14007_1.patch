@@ -1,0 +1,71 @@
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index 55b1691166..6a02b38393 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -872,6 +872,9 @@ class Model(metaclass=ModelBase):
+             results = self._do_insert(cls._base_manager, using, fields, returning_fields, raw)
+             if results:
+                 for value, field in zip(results[0], returning_fields):
++                    # Patch: Use from_db_value if present for insert returns too
++                    if hasattr(field, 'from_db_value'):
++                        value = field.from_db_value(value, None, using and connections[using] or connection)
+                     setattr(self, field.attname, value)
+         return updated
+ 
+diff --git a/django/db/models/query.py b/django/db/models/query.py
+index 387deca527..9515128231 100644
+--- a/django/db/models/query.py
++++ b/django/db/models/query.py
+@@ -504,8 +504,9 @@ class QuerySet:
+                 )
+                 for obj_with_pk, results in zip(objs_with_pk, returned_columns):
+                     for result, field in zip(results, opts.db_returning_fields):
+-                        if field != opts.pk:
+-                            setattr(obj_with_pk, field.attname, result)
++                        if hasattr(field, 'from_db_value'):
++                            result = field.from_db_value(result, None, connection)
++                        setattr(obj_with_pk, field.attname, result)
+                 for obj_with_pk in objs_with_pk:
+                     obj_with_pk._state.adding = False
+                     obj_with_pk._state.db = self.db
+@@ -518,9 +519,19 @@ class QuerySet:
+                     assert len(returned_columns) == len(objs_without_pk)
+                 for obj_without_pk, results in zip(objs_without_pk, returned_columns):
+                     for result, field in zip(results, opts.db_returning_fields):
++                        if hasattr(field, 'from_db_value'):
++                            result = field.from_db_value(result, None, connection)
+                         setattr(obj_without_pk, field.attname, result)
+                     obj_without_pk._state.adding = False
+                     obj_without_pk._state.db = self.db
++                    # Patch: For cases where pk is still None (e.g. when an AutoField subclass is used),
++                    # set pk field as well if present in results
++                    if obj_without_pk.pk is None:
++                        pk_field = opts.pk
++                        for result, field in zip(results, opts.db_returning_fields):
++                            if field == pk_field:
++                                setattr(obj_without_pk, pk_field.attname, result)
++
+ 
+         return objs
+ 
+diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py
+index f02199d97c..d65344818b 100644
+--- a/django/db/models/sql/compiler.py
++++ b/django/db/models/sql/compiler.py
+@@ -1415,7 +1415,15 @@ class SQLInsertCompiler(SQLCompiler):
+                 return self.connection.ops.fetch_returned_insert_rows(cursor)
+             if self.connection.features.can_return_columns_from_insert:
+                 assert len(self.query.objs) == 1
+-                return [self.connection.ops.fetch_returned_insert_columns(cursor, self.returning_params)]
++                # --- Patch: Use from_db_value on returned values if set ---
++                ret = self.connection.ops.fetch_returned_insert_columns(cursor, self.returning_params)
++                if self.returning_fields:
++                    ret = list(ret)
++                    for i, field in enumerate(self.returning_fields):
++                        if hasattr(field, 'from_db_value'):
++                            ret[i] = field.from_db_value(ret[i], None, self.connection)
++                    ret = tuple(ret)
++                return [ret]
+             return [(self.connection.ops.last_insert_id(
+                 cursor, self.query.get_meta().db_table, self.query.get_meta().pk.column
+             ),)]

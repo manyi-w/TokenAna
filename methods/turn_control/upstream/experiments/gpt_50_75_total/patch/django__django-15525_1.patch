@@ -1,0 +1,29 @@
+diff --git a/django/core/serializers/base.py b/django/core/serializers/base.py
+index da85cb4b92..01601bd297 100644
+--- a/django/core/serializers/base.py
++++ b/django/core/serializers/base.py
+@@ -336,10 +336,22 @@ def build_instance(Model, data, db):
+         and hasattr(default_manager, "get_by_natural_key")
+         and hasattr(Model, "natural_key")
+     ):
+-        natural_key = Model(**data).natural_key()
++        # Rebuild the natural key tuple from the fixture data instead of calling Model(**data).natural_key()
++        # This avoids requiring related objects to exist in the default DB.
++        try:
++            natural_key_fields = Model.natural_key.__code__.co_varnames[1:Model.natural_key.__code__.co_argcount]
++        except Exception:
++            natural_key_fields = () # fallback: none, but almost never used
++        
++        # Fallback to original logic if no signature found (for unusual callables)
++        if natural_key_fields:
++            # Build the tuple from the available data, expecting field values or lists for FKs.
++            nk_tuple = tuple(data[f] for f in natural_key_fields)
++        else:
++            nk_tuple = ()
+         try:
+             data[Model._meta.pk.attname] = Model._meta.pk.to_python(
+-                default_manager.db_manager(db).get_by_natural_key(*natural_key).pk
++                default_manager.db_manager(db).get_by_natural_key(*nk_tuple).pk
+             )
+         except Model.DoesNotExist:
+             pass

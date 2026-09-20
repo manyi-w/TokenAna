@@ -1,0 +1,83 @@
+diff --git a/django/db/models/deletion.py b/django/db/models/deletion.py
+index ae82d26340..9afb6fa64f 100644
+--- a/django/db/models/deletion.py
++++ b/django/db/models/deletion.py
+@@ -262,6 +262,67 @@ class Collector:
+             for obj in instances:
+                 yield model, obj
+ 
++    def optimize_fast_deletes(self):
++        """
++        Combine fast delete QuerySets that target the same model using OR conditions.
++        This reduces the number of database roundtrips by consolidating multiple
++        DELETE queries on the same table into a single query.
++        """
++        if not self.fast_deletes:
++            return
++
++        # Import Q here to avoid circular imports
++        from django.db.models import Q
++
++        # Group fast deletes by target model
++        deletes_by_model = {}
++        filters_by_model = {}
++        for qs in self.fast_deletes:
++            model = qs.model
++            if model not in deletes_by_model:
++                deletes_by_model[model] = []
++                filters_by_model[model] = []
++            deletes_by_model[model].append(qs)
++            
++            # Extract filter conditions
++            where = qs.query.where
++            if hasattr(where, 'children') and where.children:
++                for child in where.children:
++                    if hasattr(child, 'lookup_name') and child.lookup_name == 'in':
++                        if hasattr(child, 'lhs') and hasattr(child.lhs, 'target'):
++                            field_name = child.lhs.target.column
++                            values = child.rhs
++                            filters_by_model[model].append((field_name, values))
++
++        # Create combined fast deletes
++        combined_fast_deletes = []
++        for model, querysets in deletes_by_model.items():
++            if len(querysets) == 1:
++                # No need to combine if there's only one query
++                combined_fast_deletes.append(querysets[0])
++            else:
++                # Combine multiple querysets with OR conditions
++                filters = filters_by_model[model]
++                if filters:
++                    combined_q = Q()
++                    for field_name, values in filters:
++                        q_condition = Q(**{f"{field_name}__in": values})
++                        combined_q |= q_condition
++                    
++                    if combined_q.children:  # Only if we have conditions to combine
++                        # Create a new queryset with the combined condition
++                        combined_qs = model._base_manager.using(self.using).filter(combined_q)
++                        combined_fast_deletes.append(combined_qs)
++                    else:
++                        # Fallback to original querysets if combination failed
++                        combined_fast_deletes.extend(querysets)
++                else:
++                    # Fallback to original querysets if we couldn't extract filters
++                    combined_fast_deletes.extend(querysets)
++
++        # Replace the original fast deletes with the combined ones
++        self.fast_deletes = combined_fast_deletes
++
+     def sort(self):
+         sorted_models = []
+         concrete_models = set()
+@@ -309,6 +370,9 @@ class Collector:
+                         sender=model, instance=obj, using=self.using
+                     )
+ 
++            # Optimize fast deletes by combining queries to the same table
++            self.optimize_fast_deletes()
++
+             # fast deletes
+             for qs in self.fast_deletes:
+                 count = qs._raw_delete(using=self.using)
+

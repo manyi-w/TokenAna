@@ -1,0 +1,39 @@
+diff --git a/django/forms/models.py b/django/forms/models.py
+index 192d9fad94..e992df9662 100644
+--- a/django/forms/models.py
++++ b/django/forms/models.py
+@@ -630,13 +630,23 @@ def modelform_factory(
+     # creating needs to inherit from the parent's inner meta.
+     bases = (form.Meta,) if hasattr(form, "Meta") else ()
+     Meta = type("Meta", bases, attrs)
+-    if formfield_callback:
+-        Meta.formfield_callback = staticmethod(formfield_callback)
++
++    # Determine the formfield_callback to use: precedence is
++    # 1. Direct argument, 2. form.formfield_callback, 3. form.Meta.formfield_callback
++    effective_callback = formfield_callback
++    if effective_callback is None:
++        # Try to get from class attribute
++        effective_callback = getattr(form, 'formfield_callback', None)
++        if effective_callback is None:
++            # Try Meta
++            effective_callback = getattr(getattr(form, 'Meta', None), 'formfield_callback', None)
++    if effective_callback is not None:
++        Meta.formfield_callback = staticmethod(effective_callback)
+     # Give this new form class a reasonable name.
+     class_name = model.__name__ + "Form"
+ 
+     # Class attributes for the new form class.
+-    form_class_attrs = {"Meta": Meta, "formfield_callback": formfield_callback}
++    form_class_attrs = {"Meta": Meta, "formfield_callback": effective_callback}
+ 
+     if getattr(Meta, "fields", None) is None and getattr(Meta, "exclude", None) is None:
+         raise ImproperlyConfigured(
+@@ -648,6 +658,7 @@ def modelform_factory(
+     return type(form)(class_name, (form,), form_class_attrs)
+ 
+ 
++
+ # ModelFormSets ##############################################################
+ 
+ 

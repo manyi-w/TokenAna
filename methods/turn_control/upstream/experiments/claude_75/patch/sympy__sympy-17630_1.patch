@@ -1,0 +1,111 @@
+diff --git a/sympy/matrices/expressions/blockmatrix.py b/sympy/matrices/expressions/blockmatrix.py
+index 95302a05ca..c4033598cd 100644
+--- a/sympy/matrices/expressions/blockmatrix.py
++++ b/sympy/matrices/expressions/blockmatrix.py
+@@ -148,11 +148,75 @@ def blocks(self):
+ 
+     @property
+     def rowblocksizes(self):
+-        return [self.blocks[i, 0].rows for i in range(self.blockshape[0])]
++        from sympy.core import S
++        sizes = []
++        for i in range(self.blockshape[0]):
++            block = self.blocks[i, 0]
++            if hasattr(block, 'rows'):
++                sizes.append(block.rows)
++            elif block is S.Zero:
++                # If block is Zero, we need to infer the size from other blocks
++                # in the same row that are not Zero
++                row_size = None
++                for j in range(self.blockshape[1]):
++                    other_block = self.blocks[i, j]
++                    if hasattr(other_block, 'rows'):
++                        row_size = other_block.rows
++                        break
++                if row_size is None:
++                    # All blocks in this row are Zero, we need to check the original
++                    # structure or get it from corresponding column blocks
++                    for j in range(self.blockshape[1]):
++                        for k in range(self.blockshape[0]):
++                            if k != i and hasattr(self.blocks[k, j], 'rows'):
++                                # This is a heuristic - we assume uniform block sizes
++                                # which should be the case for proper BlockMatrix
++                                row_size = self.blocks[k, j].rows
++                                break
++                        if row_size is not None:
++                            break
++                if row_size is None:
++                    raise ValueError("Cannot determine row size for Zero block")
++                sizes.append(row_size)
++            else:
++                raise ValueError(f"Block {block} has no 'rows' attribute and is not Zero")
++        return sizes
+ 
+     @property
+     def colblocksizes(self):
+-        return [self.blocks[0, i].cols for i in range(self.blockshape[1])]
++        from sympy.core import S
++        sizes = []
++        for i in range(self.blockshape[1]):
++            block = self.blocks[0, i]
++            if hasattr(block, 'cols'):
++                sizes.append(block.cols)
++            elif block is S.Zero:
++                # If block is Zero, we need to infer the size from other blocks
++                # in the same column that are not Zero
++                col_size = None
++                for j in range(self.blockshape[0]):
++                    other_block = self.blocks[j, i]
++                    if hasattr(other_block, 'cols'):
++                        col_size = other_block.cols
++                        break
++                if col_size is None:
++                    # All blocks in this column are Zero, we need to check the original
++                    # structure or get it from corresponding row blocks
++                    for j in range(self.blockshape[0]):
++                        for k in range(self.blockshape[1]):
++                            if k != i and hasattr(self.blocks[j, k], 'cols'):
++                                # This is a heuristic - we assume uniform block sizes
++                                # which should be the case for proper BlockMatrix
++                                col_size = self.blocks[j, k].cols
++                                break
++                        if col_size is not None:
++                            break
++                if col_size is None:
++                    raise ValueError("Cannot determine column size for Zero block")
++                sizes.append(col_size)
++            else:
++                raise ValueError(f"Block {block} has no 'cols' attribute and is not Zero")
++        return sizes
+ 
+     def structurally_equal(self, other):
+         return (isinstance(other, BlockMatrix)
+@@ -164,7 +228,27 @@ def structurally_equal(self, other):
+     def _blockmul(self, other):
+         if (isinstance(other, BlockMatrix) and
+                 self.colblocksizes == other.rowblocksizes):
+-            return BlockMatrix(self.blocks*other.blocks)
++            from sympy.core import S
++            result_blocks = self.blocks*other.blocks
++            
++            # Convert any Zero entries back to ZeroMatrix with appropriate dimensions
++            fixed_blocks = []
++            for i in range(result_blocks.shape[0]):
++                row = []
++                for j in range(result_blocks.shape[1]):
++                    block = result_blocks[i, j]
++                    if block is S.Zero:
++                        # Determine the appropriate ZeroMatrix size
++                        # Row size comes from self's row block sizes
++                        row_size = self.rowblocksizes[i]
++                        # Column size comes from other's column block sizes  
++                        col_size = other.colblocksizes[j]
++                        row.append(ZeroMatrix(row_size, col_size))
++                    else:
++                        row.append(block)
++                fixed_blocks.append(row)
++            
++            return BlockMatrix(fixed_blocks)
+ 
+         return self * other
+ 

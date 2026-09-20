@@ -1,0 +1,70 @@
+diff --git a/lib/matplotlib/__init__.py b/lib/matplotlib/__init__.py
+index c268a56724..9ab039db94 100644
+--- a/lib/matplotlib/__init__.py
++++ b/lib/matplotlib/__init__.py
+@@ -674,7 +674,7 @@ class RcParams(MutableMapping, dict):
+             val = dict.__getitem__(self, key)
+             if val is rcsetup._auto_backend_sentinel:
+                 from matplotlib import pyplot as plt
+-                plt.switch_backend(rcsetup._auto_backend_sentinel)
++                plt._resolve_auto_backend()
+ 
+         return dict.__getitem__(self, key)
+ 
+diff --git a/lib/matplotlib/pyplot.py b/lib/matplotlib/pyplot.py
+index e3c66ea67c..04f7d70af9 100644
+--- a/lib/matplotlib/pyplot.py
++++ b/lib/matplotlib/pyplot.py
+@@ -206,6 +206,52 @@ def _get_backend_mod():
+     return _backend_mod
+ 
+ 
++def _resolve_auto_backend():
++    """
++    Resolve the auto backend sentinel to a concrete backend without closing figures.
++    
++    This is used when getting the backend value for the first time and we want to
++    avoid closing existing figures.
++    """
++    if dict.__getitem__(rcParams, "backend") is not rcsetup._auto_backend_sentinel:
++        return  # Already resolved
++        
++    current_framework = cbook._get_running_interactive_framework()
++    mapping = {'qt': 'qtagg',
++               'gtk3': 'gtk3agg',
++               'gtk4': 'gtk4agg',
++               'wx': 'wxagg',
++               'tk': 'tkagg',
++               'macosx': 'macosx',
++               'headless': 'agg'}
++
++    best_guess = mapping.get(current_framework, None)
++    if best_guess is not None:
++        candidates = [best_guess]
++    else:
++        candidates = []
++    candidates += [
++        "macosx", "qtagg", "gtk4agg", "gtk3agg", "tkagg", "wxagg"]
++
++    # Try to find a backend that works without importing it fully
++    # to avoid side effects during import
++    for candidate in candidates:
++        try:
++            # Try to import the backend module to check if it's available
++            importlib.import_module(cbook._backend_module_name(candidate))
++        except ImportError:
++            continue
++        else:
++            # Set the backend in rcParams without switching
++            dict.__setitem__(rcParams, "backend", candidate)
++            rcParamsOrig['backend'] = candidate
++            return
++    else:
++        # Fall back to agg which should always work
++        dict.__setitem__(rcParams, "backend", "agg")
++        rcParamsOrig["backend"] = "agg"
++
++
+ def switch_backend(newbackend):
+     """
+     Close all open figures and set the Matplotlib backend.

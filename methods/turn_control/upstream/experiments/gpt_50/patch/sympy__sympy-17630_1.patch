@@ -1,0 +1,38 @@
+diff --git a/sympy/matrices/expressions/blockmatrix.py b/sympy/matrices/expressions/blockmatrix.py
+index 95302a05ca..c4a0c8d554 100644
+--- a/sympy/matrices/expressions/blockmatrix.py
++++ b/sympy/matrices/expressions/blockmatrix.py
+@@ -162,10 +162,31 @@ def structurally_equal(self, other):
+             and self.colblocksizes == other.colblocksizes)
+ 
+     def _blockmul(self, other):
++
+         if (isinstance(other, BlockMatrix) and
+                 self.colblocksizes == other.rowblocksizes):
+-            return BlockMatrix(self.blocks*other.blocks)
+-
++            # Perform block multiplication such that zeros remain ZeroMatrix, not scalar 0
++            product_blocks = self.blocks * other.blocks
++            def fix_blocks(blocks, row_sizes, col_sizes):
++                from sympy.matrices.expressions.matexpr import ZeroMatrix
++                rsh, csh = len(row_sizes), len(col_sizes)
++                result = []
++                for i in range(rsh):
++                    row = []
++                    for j in range(csh):
++                        block = blocks[i, j]
++                        if getattr(block, 'is_Matrix', False):
++                            row.append(block)
++                        elif block == 0:
++                            row.append(ZeroMatrix(row_sizes[i], col_sizes[j]))
++                        else:
++                            row.append(block)
++                    result.append(row)
++                from sympy.matrices.immutable import ImmutableDenseMatrix
++                return ImmutableDenseMatrix(result)
++            fixed = fix_blocks(
++                product_blocks, self.rowblocksizes, other.colblocksizes)
++            return BlockMatrix(fixed)
+         return self * other
+ 
+     def _blockadd(self, other):

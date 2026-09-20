@@ -1,0 +1,33 @@
+diff --git a/xarray/core/computation.py b/xarray/core/computation.py
+index 823cbe02..a65f08cf 100644
+--- a/xarray/core/computation.py
++++ b/xarray/core/computation.py
+@@ -1897,6 +1897,7 @@ def polyval(
+         raise ValueError(
+             f"Dimension `{degree_dim}` should be a coordinate variable with labels."
+         )
++    import numpy as np
+     if not np.issubdtype(coeffs[degree_dim].dtype, int):
+         raise ValueError(
+             f"Dimension `{degree_dim}` should be of integer dtype. Received {coeffs[degree_dim].dtype} instead."
+@@ -1907,6 +1908,19 @@ def polyval(
+     )
+     coord = _ensure_numeric(coord)  # type: ignore # https://github.com/python/mypy/issues/1533 ?
+ 
++    # If a single coordinate is timedelta64, convert it to float64 (ns)
++    # The previous _ensure_numeric only operates on datetime64-like, not timedelta64
++    # If coord is a DataArray with timedelta64 coordinates (common for polyfit), process the coordinates used for calculation, not the DataArray values themselves.
++    if hasattr(coord, 'coords') and len(coord.coords) == 1:
++        coord_name = list(coord.coords.keys())[0]
++        if coord.coords[coord_name].dtype.kind == 'm':
++            coord = coord.copy(data=coord.coords[coord_name].astype('timedelta64[ns]').astype('float64'))
++    elif hasattr(coord, 'dtype') and coord.dtype.kind == 'm':
++        coord = coord.astype('timedelta64[ns]').astype('float64')
++    elif hasattr(coord, 'data') and hasattr(coord.data, 'dtype') and coord.data.dtype.kind == 'm':
++        # DataArray or similar
++        coord = coord.copy(data=coord.data.astype('timedelta64[ns]').astype('float64'))
++
+     # using Horner's method
+     # https://en.wikipedia.org/wiki/Horner%27s_method
+     res = coeffs.isel({degree_dim: max_deg}, drop=True) + zeros_like(coord)
+

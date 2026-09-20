@@ -1,0 +1,82 @@
+diff --git a/sympy/codegen/ast.py b/sympy/codegen/ast.py
+index a02714b174..8d706d8aff 100644
+--- a/sympy/codegen/ast.py
++++ b/sympy/codegen/ast.py
+@@ -895,8 +895,7 @@ class String(Token):
+ 
+     """
+     __slots__ = ('text',)
+-    not_in_args = ['text']
+-    is_Atom = True
++    # is_Atom = True  # This is not the correct form for is_Atom in most SymPy code, but see below.
+ 
+     @classmethod
+     def _construct_text(cls, text):
+@@ -904,8 +903,48 @@ def _construct_text(cls, text):
+             raise TypeError("Argument text is not a string type.")
+         return text
+ 
++    @property
++    def is_Atom(self):
++        return True
++
++    @property
++    def args(self):
++        # Should always return a tuple of Basic (never str)
++        # If self.text is a String (shouldn't really happen via API), flatten to the literal str
++        if isinstance(self.text, String):
++            literal = self.text.text
++        else:
++            literal = self.text
++        # Avoid infinite recursion by only wrapping str, not a String
++        if isinstance(literal, String):
++            return (literal,)
++        return (String(literal),)
++
++    def _hashable_content(self):
++        # text must be hashable for Sets, Dicts, Basic, etc.
++        return (self.text,)
++
++    def __eq__(self, other):
++        # Override, since parent Token/CodegenAST comparison expects __slots__ fields in .args
++        if type(self) != type(other):
++            return False
++        return self.text == other.text
++
++    def match(self, pattern, **wildcards):
++        # Allow match for String objects to work like for sympy.core.symbol.Str
++        if isinstance(pattern, String):
++            return {} if self.text == pattern.text else None
++        # fallback
++        return super().match(pattern, **wildcards)
++
++    def __repr__(self):
++        return f"{self.__class__.__name__}({self.text!r})"
++
+     def _sympystr(self, printer, *args, **kwargs):
+         return self.text
++    def __hash__(self):
++        return hash((self.__class__, self.text))
++
+ 
+ 
+ class QuotedString(String):
+@@ -939,7 +978,16 @@ class Node(Token):
+ 
+     defaults = {'attrs': Tuple()}  # type: tDict[str, Any]
+ 
+-    _construct_attrs = staticmethod(_mk_Tuple)
++    @staticmethod
++    def _construct_attrs(itr):
++        # Accept sets for attrs and convert to tuple
++        if isinstance(itr, set):
++            itr = tuple(itr)
++        if not iterable(itr):
++            raise TypeError("iterable must be an iterable")
++        if isinstance(itr, list):  # _sympify errors on lists because they are mutable
++            itr = tuple(itr)
++        return _sympify(itr)
+ 
+     def attr_params(self, looking_for):
+         """ Returns the parameters of the Attribute with name ``looking_for`` in self.attrs """
+

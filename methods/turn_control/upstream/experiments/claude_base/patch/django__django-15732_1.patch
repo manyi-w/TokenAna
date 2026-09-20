@@ -1,0 +1,43 @@
+diff --git a/django/db/backends/base/schema.py b/django/db/backends/base/schema.py
+index f2ca8c8df9..6ac45a4e9f 100644
+--- a/django/db/backends/base/schema.py
++++ b/django/db/backends/base/schema.py
+@@ -568,6 +568,37 @@ class BaseDatabaseSchemaEditor:
+             exclude=meta_constraint_names | meta_index_names,
+             **constraint_kwargs,
+         )
++        
++        # If we're removing a unique constraint and there are multiple constraints,
++        # filter out constraints that might have been created by individual field
++        # unique=True attributes rather than by unique_together.
++        if len(constraint_names) > 1 and constraint_kwargs.get("unique"):
++            # Get all constraints info to help filter
++            with self.connection.cursor() as cursor:
++                constraints_info = self.connection.introspection.get_constraints(
++                    cursor, model._meta.db_table
++                )
++            
++            # If there's exactly one field in the constraint and that field has unique=True,
++            # we need to be careful not to delete the field-level unique constraint
++            if len(fields) == 1:
++                field_obj = model._meta.get_field(fields[0])
++                if field_obj.unique:
++                    # Filter constraint names to prefer the ones that look like they were
++                    # created by unique_together (typically have table name + field names)
++                    composed_constraint_names = []
++                    for name in constraint_names:
++                        constraint_info = constraints_info.get(name, {})
++                        # Prefer constraints that are indexed (created by unique_together)
++                        # over non-indexed ones (created by field unique=True)
++                        if constraint_info.get("index", False):
++                            composed_constraint_names.append(name)
++                    
++                    # If we found constraints that look like they're from unique_together,
++                    # use those instead
++                    if composed_constraint_names:
++                        constraint_names = composed_constraint_names
++        
+         if len(constraint_names) != 1:
+             raise ValueError(
+                 "Found wrong number (%s) of constraints for %s(%s)"
+

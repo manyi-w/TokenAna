@@ -1,0 +1,33 @@
+diff --git a/django/db/models/deletion.py b/django/db/models/deletion.py
+index 3a462f1c4c..9023ad6e39 100644
+--- a/django/db/models/deletion.py
++++ b/django/db/models/deletion.py
+@@ -232,9 +232,25 @@ class Collector:
+         """
+         Get a QuerySet of objects related to `objs` via the relation `related`.
+         """
+-        return related.related_model._base_manager.using(self.using).filter(
++        # Get the related model's metadata
++        related_model = related.related_model
++        opts = related_model._meta
++        
++        # For deletion, we need:
++        # 1. Primary key (always needed for deletion)
++        # 2. Foreign key fields (needed for parent relationships and further cascades)
++        fields_needed = [opts.pk.name]
++        
++        # Add foreign key fields (concrete fields only, not reverse relations)
++        for field in opts.get_fields():
++            if (hasattr(field, 'remote_field') and field.remote_field and 
++                hasattr(field, 'concrete') and field.concrete and
++                hasattr(field, 'name')):
++                fields_needed.append(field.name)
++        
++        return related_model._base_manager.using(self.using).filter(
+             **{"%s__in" % related.field.name: objs}
+-        )
++        ).only(*fields_needed)
+ 
+     def instances_with_model(self):
+         for model, instances in self.data.items():
+

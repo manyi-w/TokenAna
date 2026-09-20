@@ -1,0 +1,45 @@
+diff --git a/xarray/core/computation.py b/xarray/core/computation.py
+index 823cbe02..54beb1ee 100644
+--- a/xarray/core/computation.py
++++ b/xarray/core/computation.py
+@@ -1911,9 +1911,20 @@ def polyval(
+     # https://en.wikipedia.org/wiki/Horner%27s_method
+     res = coeffs.isel({degree_dim: max_deg}, drop=True) + zeros_like(coord)
+     for deg in range(max_deg - 1, -1, -1):
+-        res *= coord
+-        res += coeffs.isel({degree_dim: deg}, drop=True)
+-
++        # align along broadcasted dimension
++        from xarray import align  # avoid top-level import cycle
++        res, coord_b = align(res, coord, join="outer")
++        res = res * coord_b
++        res = res + coeffs.isel({degree_dim: deg}, drop=True)
++    
++    # Try to transpose to match the dimension order (input-dims, coeff-dims w/o degree_dim)
++    # If both input dims & coeff dims exist, put all input dims first, then other dims as in coeffs (excluding degree)
++    # Try to transpose to match the dimension order of the expected numpy.polyval output.
++    # If both input dims & coeff dims exist, preserve coeff dims order (excluding degree), then input dims order
++    coeff_dims = tuple(d for d in coeffs.dims if d != degree_dim and d in res.dims)
++    input_dims = tuple(d for d in getattr(coord, 'dims', []) if d in res.dims and d not in coeff_dims)
++    if coeff_dims or input_dims:  # non-empty
++        res = res.transpose(*(coeff_dims + input_dims))
+     return res
+ 
+ 
+@@ -1933,7 +1944,14 @@ def _ensure_numeric(data: T_Xarray) -> T_Xarray:
+     from .dataset import Dataset
+ 
+     def to_floatable(x: DataArray) -> DataArray:
+-        if x.dtype.kind in "mM":
++        if x.dtype.kind == "m":  # timedelta64
++            # convert to seconds float (for legacy and compatibility)
++            return x.copy(
++                data=datetime_to_numeric(
++                    x.data, offset=None, datetime_unit="s"
++                ),
++            )
++        elif x.dtype.kind == "M":  # datetime64
+             return x.copy(
+                 data=datetime_to_numeric(
+                     x.data,
+

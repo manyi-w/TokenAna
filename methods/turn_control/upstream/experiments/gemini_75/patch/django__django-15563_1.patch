@@ -1,0 +1,74 @@
+diff --git a/django/db/models/sql/subqueries.py b/django/db/models/sql/subqueries.py
+index 04063f73bc..8c46ab7b3a 100644
+--- a/django/db/models/sql/subqueries.py
++++ b/django/db/models/sql/subqueries.py
+@@ -96,9 +96,14 @@ class UpdateQuery(Query):
+                     "foreign keys permitted)." % field
+                 )
+             if model is not self.get_meta().concrete_model:
+-                self.add_related_update(model, field, val)
+-                continue
+-            values_seq.append((field, model, val))
++                for p in self.get_meta().parents:
++                    if p.model == model:
++                        self.add_related_update(model, field, val)
++                        break
++                else:
++                    values_seq.append((field, model, val))
++            else:
++                values_seq.append((field, model, val))
+         return self.add_update_fields(values_seq)
+ 
+     def add_update_fields(self, values_seq):
+@@ -119,7 +124,8 @@ class UpdateQuery(Query):
+ 
+         Update are coalesced so that only one update query per ancestor is run.
+         """
+-        self.related_updates.setdefault(model, []).append((field, None, value))
++        self.related_updates.setdefault(model, {})
++        self.related_updates[model][field.name] = value
+ 
+     def get_related_updates(self):
+         """
+@@ -129,12 +135,37 @@ class UpdateQuery(Query):
+         """
+         if not self.related_updates:
+             return []
++        from django.db.models.fields.related import OneToOneField
+         result = []
+         for model, values in self.related_updates.items():
+             query = UpdateQuery(model)
+-            query.values = values
+-            if self.related_ids is not None:
+-                query.add_filter("pk__in", self.related_ids)
++            query.add_update_values(values)
++            if self.related_ids is None:
++                # We need to use a subquery to work out the PKs to update.
++                pk_query = self.clone()
++                pk_query.clear_select_fields()
++                pk_query.select_related = False
++                # Grab the keys of the original model since the result of this
++                # query will be piped into the related model's query.
++                if self.model._meta.concrete_model == model._meta.concrete_model:
++                    pk_query.add_fields([self.model._meta.pk.name])
++                else:
++                    # Find the fks on the descendant that point to the ancestor
++                    # we're updating.
++                    for f in self.model._meta.get_fields():
++                        if isinstance(f, OneToOneField) and f.related_model == model:
++                            pk_query.add_fields([f.attname], False)
++                            break
++                    else:
++                        # Should be unreachable.
++                        raise RuntimeError(
++                            'The model %s has no parent link to %s.' % (
++                                self.model, model
++                            )
++                        )
++                query.add_filter('pk__in', pk_query)
++            else:
++                query.add_filter('pk__in', self.related_ids)
+             result.append(query)
+         return result
+ 
+

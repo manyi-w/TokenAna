@@ -1,0 +1,48 @@
+diff --git a/django/db/models/sql/subqueries.py b/django/db/models/sql/subqueries.py
+index 04063f73bc..854ef85fcb 100644
+--- a/django/db/models/sql/subqueries.py
++++ b/django/db/models/sql/subqueries.py
+@@ -53,6 +53,7 @@ class UpdateQuery(Query):
+     def __init__(self, *args, **kwargs):
+         super().__init__(*args, **kwargs)
+         self._setup_query()
++        self.pk_field = self.model._meta.pk
+ 
+     def _setup_query(self):
+         """
+@@ -69,11 +70,13 @@ class UpdateQuery(Query):
+         return obj
+ 
+     def update_batch(self, pk_list, values, using):
++        self.related_ids = pk_list
+         self.add_update_values(values)
+         for offset in range(0, len(pk_list), GET_ITERATOR_CHUNK_SIZE):
+             self.clear_where()
+             self.add_filter(
+-                "pk__in", pk_list[offset : offset + GET_ITERATOR_CHUNK_SIZE]
++                f"{self.pk_field.attname}__in",
++                pk_list[offset : offset + GET_ITERATOR_CHUNK_SIZE],
+             )
+             self.get_compiler(using).execute_sql(NO_RESULTS)
+ 
+@@ -134,7 +137,18 @@ class UpdateQuery(Query):
+             query = UpdateQuery(model)
+             query.values = values
+             if self.related_ids is not None:
+-                query.add_filter("pk__in", self.related_ids)
++                parent_link_field = None
++                for parent, field in self.model._meta.parents.items():
++                    if parent == model:
++                        parent_link_field = field
++                        break
++                if parent_link_field:
++                    parent_pks = self.model._base_manager.filter(
++                        pk__in=self.related_ids
++                    ).values_list(parent_link_field.attname, flat=True)
++                    query.add_filter('pk__in', list(parent_pks))
++                else:
++                    query.add_filter('pk__in', self.related_ids)
+             result.append(query)
+         return result
+ 
+

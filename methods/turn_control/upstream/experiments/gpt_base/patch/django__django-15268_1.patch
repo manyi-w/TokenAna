@@ -1,0 +1,128 @@
+diff --git a/django/db/migrations/operations/models.py b/django/db/migrations/operations/models.py
+index c120f5d32d..4eda217891 100644
+--- a/django/db/migrations/operations/models.py
++++ b/django/db/migrations/operations/models.py
+@@ -476,6 +476,17 @@ class AlterTogetherOptionOperation(ModelOptionOperation):
+         setattr(self, self.option_name, option_value)
+         super().__init__(name)
+ 
++    def reduce(self, operation, app_label):
++        # If another AlterTogetherOptionOperation of the same type for the same model follows,
++        # the previous ones can be dropped in favor of the latest one (as it overrides).
++        if (
++            isinstance(operation, self.__class__)
++            and self.name_lower == operation.name_lower
++        ):
++            # Always drop the earlier (self), keep only latest (operation).
++            return [operation]
++        return super().reduce(operation, app_label)
++
+     @cached_property
+     def option_value(self):
+         return getattr(self, self.option_name)
+diff --git a/django/db/migrations/optimizer.py b/django/db/migrations/optimizer.py
+index ee20f62af2..9b9e406a61 100644
+--- a/django/db/migrations/optimizer.py
++++ b/django/db/migrations/optimizer.py
+@@ -38,6 +38,69 @@ class MigrationOptimizer:
+             operations = result
+ 
+     def optimize_inner(self, operations, app_label):
++        # Default optimization
++        new_operations = []
++        # First, run normal optimizer
++        for i, operation in enumerate(operations):
++            right = True
++            for j, other in enumerate(operations[i + 1:]):
++                result = operation.reduce(other, app_label)
++                if isinstance(result, list):
++                    in_between = operations[i + 1:i + j + 1]
++                    if right:
++                        new_operations.extend(in_between)
++                        new_operations.extend(result)
++                    elif all(op.reduce(other, app_label) is True for op in in_between):
++                        new_operations.extend(result)
++                        new_operations.extend(in_between)
++                    else:
++                        new_operations.append(operation)
++                        break
++                    new_operations.extend(operations[i + j + 2:])
++                    return new_operations
++                elif not result:
++                    right = False
++            else:
++                new_operations.append(operation)
++        # Then, merge adjacent AlterTogetherOptionOperation nodes of same type/model
++        merged = []
++        i = 0
++        while i < len(new_operations):
++            op = new_operations[i]
++            if (
++                isinstance(op, (
++                    __import__('django.db.migrations.operations.models').db.migrations.operations.models.AlterUniqueTogether,
++                    __import__('django.db.migrations.operations.models').db.migrations.operations.models.AlterIndexTogether,
++                ))
++            ):
++                j = i
++                # Always skip all but the _last_ for that type/model, drop set() if a non-empty follows for same type/model
++                while (
++                    j + 1 < len(new_operations)
++                    and type(new_operations[j + 1]) == type(op)
++                    and getattr(new_operations[j + 1], 'name_lower', None) == getattr(op, 'name_lower', None)
++                ):
++                    j += 1
++                # If non-empty follows (j), skip all previous empty for that type/model
++                # Only add the last non-empty for this type/model, but if they're all empty, add just the last (to preserve drop semantics)
++                last_nonempty = None
++                for k in range(i, j+1):
++                    if getattr(new_operations[k], new_operations[k].option_name, None):
++                        last_nonempty = new_operations[k]
++                if last_nonempty:
++                    # Remove any set()/empty for same name_lower between i and j (if a nonempty appears)
++                    merged = [x for x in merged if not (
++                        type(x) == type(op) and getattr(x, 'name_lower', None) == getattr(op, 'name_lower', None) and getattr(x, x.option_name, None) == set())
++                    ]
++                    merged.append(last_nonempty)
++                else:
++                    merged.append(new_operations[j])
++                i = j + 1
++            else:
++                merged.append(op)
++                i += 1
++        return merged
++
+         """Inner optimization loop."""
+         new_operations = []
+         for i, operation in enumerate(operations):
+@@ -67,3 +130,31 @@ class MigrationOptimizer:
+             else:
+                 new_operations.append(operation)
+         return new_operations
++
++
++        # --- Custom pass to merge adjacent AlterTogetherOptionOperation, but only for unique/index together ---
++        merged = []
++        i = 0
++        while i < len(new_operations):
++            op = new_operations[i]
++            # UniqueTogether
++            if (
++                isinstance(op, (
++                    __import__('django.db.migrations.operations.models').db.migrations.operations.models.AlterUniqueTogether,
++                    __import__('django.db.migrations.operations.models').db.migrations.operations.models.AlterIndexTogether,
++                ))
++            ):
++                j = i
++                # advance to last same-type, same-name_lower
++                while (
++                    j + 1 < len(new_operations)
++                    and type(new_operations[j + 1]) == type(op)
++                    and getattr(new_operations[j + 1], 'name_lower', None) == getattr(op, 'name_lower', None)
++                ):
++                    j += 1
++                merged.append(new_operations[j])
++                i = j + 1
++            else:
++                merged.append(op)
++                i += 1
++        return merged

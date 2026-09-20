@@ -1,0 +1,74 @@
+diff --git a/django/db/models/expressions.py b/django/db/models/expressions.py
+index d913658291..04a86e3730 100644
+--- a/django/db/models/expressions.py
++++ b/django/db/models/expressions.py
+@@ -473,6 +473,69 @@ class CombinedExpression(SQLiteNumericMixin, Expression):
+         sql = connection.ops.combine_expression(self.connector, expressions)
+         return expression_wrapper % sql, expression_params
+ 
++    def _resolve_output_field(self):
++        """
++        Attempt to infer the output type for combined expressions.
++        Handle special cases for temporal arithmetic operations.
++        """
++        try:
++            lhs_field = self.lhs._output_field_or_none
++        except AttributeError:
++            # Fallback for expressions that don't have _output_field_or_none
++            try:
++                lhs_field = self.lhs.output_field
++            except FieldError:
++                lhs_field = None
++
++        try:
++            rhs_field = self.rhs._output_field_or_none
++        except AttributeError:
++            # Fallback for expressions that don't have _output_field_or_none
++            try:
++                rhs_field = self.rhs.output_field
++            except FieldError:
++                rhs_field = None
++
++        # Handle temporal arithmetic operations
++        if lhs_field and rhs_field:
++            lhs_type = lhs_field.get_internal_type()
++            rhs_type = rhs_field.get_internal_type()
++            
++            datetime_fields = {'DateField', 'DateTimeField', 'TimeField'}
++            
++            # DateTime - DateTime = Duration
++            if (self.connector == self.SUB and 
++                lhs_type in datetime_fields and 
++                rhs_type in datetime_fields):
++                return fields.DurationField()
++            
++            # DateTime + Duration = DateTime
++            if (self.connector == self.ADD and 
++                lhs_type in datetime_fields and 
++                rhs_type == 'DurationField'):
++                return lhs_field
++                
++            # Duration + DateTime = DateTime  
++            if (self.connector == self.ADD and 
++                lhs_type == 'DurationField' and 
++                rhs_type in datetime_fields):
++                return rhs_field
++                
++            # DateTime - Duration = DateTime
++            if (self.connector == self.SUB and 
++                lhs_type in datetime_fields and 
++                rhs_type == 'DurationField'):
++                return lhs_field
++                
++            # Duration +/- Duration = Duration
++            if (self.connector in (self.ADD, self.SUB) and 
++                lhs_type == 'DurationField' and 
++                rhs_type == 'DurationField'):
++                return fields.DurationField()
++
++        # Fall back to the default behavior
++        return super()._resolve_output_field()
++
+     def resolve_expression(self, query=None, allow_joins=True, reuse=None, summarize=False, for_save=False):
+         c = self.copy()
+         c.is_summary = summarize

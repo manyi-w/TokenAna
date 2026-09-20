@@ -1,0 +1,35 @@
+diff --git a/django/contrib/admin/options.py b/django/contrib/admin/options.py
+index 5f07a4208a..48b909425e 100644
+--- a/django/contrib/admin/options.py
++++ b/django/contrib/admin/options.py
+@@ -1939,6 +1939,14 @@ class ModelAdmin(BaseModelAdmin):
+                 )
+             return HttpResponseRedirect(request.path + "?" + ERROR_FLAG + "=1")
+ 
++        # Wrap only the list_editable POST handling in a transaction
++        if request.method == "POST" and cl.list_editable and "_save" in request.POST:
++            with transaction.atomic(using=router.db_for_write(self.model)):
++                return self._changelist_view_inner(request, cl, extra_context)
++        else:
++            return self._changelist_view_inner(request, cl, extra_context)
++
++    def _changelist_view_inner(self, request, cl, extra_context=None):
+         # If the request was POSTed, this might be a bulk action or a bulk
+         # edit. Try to look up an action or confirmation first, but if this
+         # isn't an action the POST will fall through to the bulk edit check,
+@@ -2009,6 +2017,7 @@ class ModelAdmin(BaseModelAdmin):
+             formset = cl.formset = FormSet(
+                 request.POST, request.FILES, queryset=modified_objects
+             )
++
+             if formset.is_valid():
+                 changecount = 0
+                 for form in formset.forms:
+@@ -2079,6 +2088,7 @@ class ModelAdmin(BaseModelAdmin):
+ 
+         request.current_app = self.admin_site.name
+ 
++        app_label = self.opts.app_label
+         return TemplateResponse(
+             request,
+             self.change_list_template

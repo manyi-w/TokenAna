@@ -1,0 +1,77 @@
+diff --git a/sympy/matrices/expressions/blockmatrix.py b/sympy/matrices/expressions/blockmatrix.py
+index 95302a05ca..3158c0e794 100644
+--- a/sympy/matrices/expressions/blockmatrix.py
++++ b/sympy/matrices/expressions/blockmatrix.py
+@@ -148,11 +148,39 @@ def blocks(self):
+ 
+     @property
+     def rowblocksizes(self):
+-        return [self.blocks[i, 0].rows for i in range(self.blockshape[0])]
++        def get_rows(i):
++            # Try to get rows from the first block in row i
++            block = self.blocks[i, 0]
++            if hasattr(block, 'rows'):
++                return block.rows
++            # If it's a Zero scalar, find rows from other blocks in the same row
++            for j in range(self.blockshape[1]):
++                candidate = self.blocks[i, j]
++                if hasattr(candidate, 'rows'):
++                    return candidate.rows
++            # If all blocks in this row are Zero scalars, we need to infer the size
++            # This can happen in degenerate cases, but we can't determine the size
++            raise ValueError("Cannot determine row size: all blocks in row %d are scalars" % i)
++        
++        return [get_rows(i) for i in range(self.blockshape[0])]
+ 
+     @property
+     def colblocksizes(self):
+-        return [self.blocks[0, i].cols for i in range(self.blockshape[1])]
++        def get_cols(j):
++            # Try to get cols from the first block in column j
++            block = self.blocks[0, j]
++            if hasattr(block, 'cols'):
++                return block.cols
++            # If it's a Zero scalar, find cols from other blocks in the same column
++            for i in range(self.blockshape[0]):
++                candidate = self.blocks[i, j]
++                if hasattr(candidate, 'cols'):
++                    return candidate.cols
++            # If all blocks in this column are Zero scalars, we need to infer the size
++            # This can happen in degenerate cases, but we can't determine the size
++            raise ValueError("Cannot determine column size: all blocks in column %d are scalars" % j)
++        
++        return [get_cols(j) for j in range(self.blockshape[1])]
+ 
+     def structurally_equal(self, other):
+         return (isinstance(other, BlockMatrix)
+@@ -164,7 +192,29 @@ def structurally_equal(self, other):
+     def _blockmul(self, other):
+         if (isinstance(other, BlockMatrix) and
+                 self.colblocksizes == other.rowblocksizes):
+-            return BlockMatrix(self.blocks*other.blocks)
++            result_blocks = self.blocks*other.blocks
++            
++            # Convert any Zero scalars back to ZeroMatrix objects with proper dimensions
++            from sympy.core.numbers import Zero
++            from sympy.matrices.immutable import ImmutableDenseMatrix
++            
++            # Get the expected block dimensions
++            result_row_sizes = self.rowblocksizes
++            result_col_sizes = other.colblocksizes
++            
++            # Create corrected blocks
++            new_blocks = []
++            for i in range(result_blocks.shape[0]):
++                row = []
++                for j in range(result_blocks.shape[1]):
++                    block = result_blocks[i, j]
++                    if isinstance(block, Zero):
++                        # Convert Zero scalar to ZeroMatrix with proper dimensions
++                        block = ZeroMatrix(result_row_sizes[i], result_col_sizes[j])
++                    row.append(block)
++                new_blocks.append(row)
++            
++            return BlockMatrix(new_blocks)
+ 
+         return self * other
+ 

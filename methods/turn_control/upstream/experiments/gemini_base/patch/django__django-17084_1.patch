@@ -1,0 +1,31 @@
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 13a6809dd8..a3007c939b 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -400,6 +400,7 @@ class Query(BaseExpression):
+         """
+         if not aggregate_exprs:
+             return {}
++        self.subquery_needed = False
+         # Store annotation mask prior to temporarily adding aggregations for
+         # resolving purpose to facilitate their subsequent removal.
+         refs_subquery = False
+@@ -412,6 +413,8 @@ class Query(BaseExpression):
+             )
+             if not aggregate.contains_aggregate:
+                 raise TypeError("%s is not an aggregate expression" % alias)
++            if aggregate.contains_over_clause:
++                self.subquery_needed = True
+             # Temporarily add aggregate to annotations to allow remaining
+             # members of `aggregates` to resolve against each others.
+             self.append_annotation_mask([alias])
+@@ -447,7 +450,8 @@ class Query(BaseExpression):
+         # aggregates on the limit and/or distinct results instead of applying
+         # the distinct and limit after the aggregation.
+         if (
+-            isinstance(self.group_by, tuple)
++            self.subquery_needed
++            or isinstance(self.group_by, tuple)
+             or self.is_sliced
+             or has_existing_aggregation
+             or refs_subquery

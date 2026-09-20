@@ -1,0 +1,44 @@
+diff --git a/django/db/models/deletion.py b/django/db/models/deletion.py
+index 3a462f1c4c..bc06794b51 100644
+--- a/django/db/models/deletion.py
++++ b/django/db/models/deletion.py
+@@ -232,9 +232,38 @@ class Collector:
+         """
+         Get a QuerySet of objects related to `objs` via the relation `related`.
+         """
+-        return related.related_model._base_manager.using(self.using).filter(
++        # Optimize by only selecting fields that are needed for deletion:
++        # 1. Primary key (always needed)
++        # 2. Foreign key fields (might be needed for signals or cascade relationships)
++        # 3. Don't select large text/blob fields that might cause UnicodeDecodeError
++        related_model = related.related_model
++        queryset = related_model._base_manager.using(self.using).filter(
+             **{"%s__in" % related.field.name: objs}
+         )
++        
++        # Determine if this model has signals that might need all fields
++        has_signals = (
++            signals.pre_delete.has_listeners(related_model) or
++            signals.post_delete.has_listeners(related_model) or
++            signals.m2m_changed.has_listeners(related_model)
++        )
++        
++        # If there are no signals and the object can be fast-deleted,
++        # we only need the primary key
++        if not has_signals and self.can_fast_delete(queryset):
++            return queryset.only('pk')
++        else:
++            # We need fields that might be accessed by signals or cascade operations
++            # Select primary key and all foreign key fields, but exclude potentially
++            # problematic text fields that might contain invalid unicode
++            select_fields = [related_model._meta.pk.name]
++            
++            # Add foreign key fields that might be needed
++            for field in related_model._meta.fields:
++                if field.many_to_one or field.one_to_one:
++                    select_fields.append(field.name)
++            
++            return queryset.only(*select_fields)
+ 
+     def instances_with_model(self):
+         for model, instances in self.data.items():

@@ -1,0 +1,72 @@
+diff --git a/lib/matplotlib/__init__.py b/lib/matplotlib/__init__.py
+index c268a56724..7cea622f34 100644
+--- a/lib/matplotlib/__init__.py
++++ b/lib/matplotlib/__init__.py
+@@ -674,7 +674,7 @@ class RcParams(MutableMapping, dict):
+             val = dict.__getitem__(self, key)
+             if val is rcsetup._auto_backend_sentinel:
+                 from matplotlib import pyplot as plt
+-                plt.switch_backend(rcsetup._auto_backend_sentinel)
++                plt._resolve_auto_backend_without_closing_figures()
+ 
+         return dict.__getitem__(self, key)
+ 
+diff --git a/lib/matplotlib/pyplot.py b/lib/matplotlib/pyplot.py
+index e3c66ea67c..bda12341c2 100644
+--- a/lib/matplotlib/pyplot.py
++++ b/lib/matplotlib/pyplot.py
+@@ -322,6 +322,54 @@ def switch_backend(newbackend):
+     install_repl_displayhook()
+ 
+ 
++def _resolve_auto_backend_without_closing_figures():
++    """
++    Resolve the auto backend sentinel to a concrete backend without closing figures.
++    
++    This function is called when accessing rcParams['backend'] and it's still
++    the auto sentinel. Unlike switch_backend(), this function does not close
++    existing figures, making it safe to call when figures already exist.
++    """
++    import importlib
++    
++    current_framework = cbook._get_running_interactive_framework()
++    mapping = {'qt': 'qtagg',
++               'gtk3': 'gtk3agg',
++               'gtk4': 'gtk4agg',
++               'wx': 'wxagg',
++               'tk': 'tkagg',
++               'macosx': 'macosx',
++               'headless': 'agg'}
++
++    best_guess = mapping.get(current_framework, None)
++    if best_guess is not None:
++        candidates = [best_guess]
++    else:
++        candidates = []
++    candidates += [
++        "macosx", "qtagg", "gtk4agg", "gtk3agg", "tkagg", "wxagg"]
++
++    # Don't try to fallback on the cairo-based backends as they each have
++    # an additional dependency (pycairo) over the agg-based backend, and
++    # are of worse quality.
++    for candidate in candidates:
++        try:
++            # Test if the backend can be imported without switching to it
++            importlib.import_module(cbook._backend_module_name(candidate))
++        except ImportError:
++            continue
++        else:
++            # Set the backend directly without closing figures
++            rcParams['backend'] = candidate
++            rcParamsOrig['backend'] = candidate
++            return candidate
++    else:
++        # Fall back to Agg as it should always work
++        rcParams['backend'] = "agg"
++        rcParamsOrig["backend"] = "agg"
++        return "agg"
++
++
+ def _warn_if_gui_out_of_main_thread():
+     if (_get_required_interactive_framework(_get_backend_mod())
+             and threading.current_thread() is not threading.main_thread()):

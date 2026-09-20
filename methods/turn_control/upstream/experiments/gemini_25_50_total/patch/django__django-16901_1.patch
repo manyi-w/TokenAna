@@ -1,0 +1,41 @@
+diff --git a/django/db/models/sql/where.py b/django/db/models/sql/where.py
+index aaab1730b7..4afce24dca 100644
+--- a/django/db/models/sql/where.py
++++ b/django/db/models/sql/where.py
+@@ -126,19 +126,22 @@ class WhereNode(tree.Node):
+             full_needed, empty_needed = 1, len(self.children)
+ 
+         if self.connector == XOR and not connection.features.supports_logical_xor:
+-            # Convert if the database doesn't support XOR:
+-            #   a XOR b XOR c XOR ...
+-            # to:
+-            #   (a OR b OR c OR ...) AND (a + b + c + ...) == 1
+-            lhs = self.__class__(self.children, OR)
+-            rhs_sum = reduce(
+-                operator.add,
+-                (Case(When(c, then=1), default=0) for c in self.children),
+-            )
+-            rhs = Exact(1, rhs_sum)
+-            return self.__class__([lhs, rhs], AND, self.negated).as_sql(
+-                compiler, connection
+-            )
++            # A XOR B XOR C is equivalent to (A XOR B) XOR C.
++            # A XOR B is equivalent to (A AND NOT B) OR (NOT A AND B).
++            if not self.children:
++                return '', []
++            if len(self.children) == 1:
++                return compiler.compile(self.children[0])
++
++            result, *rest = self.children
++            for child in rest:
++                # (result AND NOT child) OR (NOT result AND child)
++                negated_child = self.create([child], AND, negated=True)
++                negated_result = self.create([result], AND, negated=True)
++                left = self.create([result, negated_child], AND)
++                right = self.create([negated_result, child], AND)
++                result = self.create([left, right], OR)
++            return result.as_sql(compiler, connection)
+ 
+         for child in self.children:
+             try:
+

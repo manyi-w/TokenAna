@@ -1,0 +1,46 @@
+diff --git a/django/contrib/auth/checks.py b/django/contrib/auth/checks.py
+index 65fc266f7e..055a7b9a34 100644
+--- a/django/contrib/auth/checks.py
++++ b/django/contrib/auth/checks.py
+@@ -4,10 +4,32 @@ from types import MethodType
+ from django.apps import apps
+ from django.conf import settings
+ from django.core import checks
++from django.db.models import UniqueConstraint
+ 
+ from .management import _get_builtin_permissions
+ 
+ 
++def _check_field_uniqueness(cls, field_name):
++    """
++    Check if a field is unique either through field.unique=True or via a 
++    UniqueConstraint that only includes that field.
++    """
++    field = cls._meta.get_field(field_name)
++    
++    # Check field-level unique constraint
++    if field.unique:
++        return True
++    
++    # Check model-level UniqueConstraint
++    for constraint in cls._meta.constraints:
++        if (isinstance(constraint, UniqueConstraint) and 
++            field_name in constraint.fields and 
++            len(constraint.fields) == 1):
++            return True
++    
++    return False
++
++
+ def check_user_model(app_configs=None, **kwargs):
+     if app_configs is None:
+         cls = apps.get_model(settings.AUTH_USER_MODEL)
+@@ -52,7 +74,7 @@ def check_user_model(app_configs=None, **kwargs):
+         )
+ 
+     # Check that the username field is unique
+-    if not cls._meta.get_field(cls.USERNAME_FIELD).unique:
++    if not _check_field_uniqueness(cls, cls.USERNAME_FIELD):
+         if (settings.AUTHENTICATION_BACKENDS ==
+                 ['django.contrib.auth.backends.ModelBackend']):
+             errors.append(

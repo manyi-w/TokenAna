@@ -1,0 +1,104 @@
+diff --git a/lib/matplotlib/_mathtext.py b/lib/matplotlib/_mathtext.py
+index 09f5c61879..0184ae5630 100644
+--- a/lib/matplotlib/_mathtext.py
++++ b/lib/matplotlib/_mathtext.py
+@@ -124,7 +124,7 @@ class Output:
+         for ox, oy, info in shifted.glyphs:
+             info.font.draw_glyph_to_bitmap(
+                 image, ox, oy - info.metrics.iceberg, info.glyph,
+-                antialiased=mpl.rcParams['text.antialiased'])
++                antialiased=getattr(info.font, 'mtext', None).get_antialiased() if hasattr(getattr(info.font, 'mtext', None), 'get_antialiased') else mpl.rcParams['text.antialiased'])
+         for x1, y1, x2, y2 in shifted.rects:
+             height = max(int(y2 - y1) - 1, 0)
+             if height == 0:
+diff --git a/lib/matplotlib/backends/backend_agg.py b/lib/matplotlib/backends/backend_agg.py
+index 7d038a998f..9dc7575ec2 100644
+--- a/lib/matplotlib/backends/backend_agg.py
++++ b/lib/matplotlib/backends/backend_agg.py
+@@ -205,8 +205,10 @@ class RendererAgg(RendererBase):
+         # We pass '0' for angle here, since it will be rotated (in raster
+         # space) in the following call to draw_text_image).
+         font.set_text(s, 0, flags=get_hinting_flag())
++        # mtext may be a matplotlib.text.Text; fallback to rcParams otherwise.
++        antialiased = mtext.get_antialiased() if mtext is not None and hasattr(mtext, 'get_antialiased') else mpl.rcParams['text.antialiased']
+         font.draw_glyphs_to_bitmap(
+-            antialiased=mpl.rcParams['text.antialiased'])
++            antialiased=antialiased)
+         d = font.get_descent() / 64.0
+         # The descent needs to be adjusted for the angle.
+         xo, yo = font.get_bitmap_offset()
+diff --git a/lib/matplotlib/text.py b/lib/matplotlib/text.py
+index 4591316cf9..cde9150681 100644
+--- a/lib/matplotlib/text.py
++++ b/lib/matplotlib/text.py
+@@ -98,6 +98,20 @@ class Text(Artist):
+     zorder = 3
+     _charsize_cache = dict()
+ 
++    def get_antialiased(self):
++        """Return whether to use antialiased rendering, or the default rcParam if unset."""
++        if self._antialiased is None:
++            return mpl.rcParams['text.antialiased']
++        return self._antialiased
++
++    def set_antialiased(self, aa):
++        """Set whether to use antialiased rendering."""
++        if aa is None:
++            self._antialiased = None
++        else:
++            self._antialiased = bool(aa)
++        self.stale = True
++
+     def __repr__(self):
+         return f"Text({self._x}, {self._y}, {self._text!r})"
+ 
+@@ -134,6 +148,8 @@ class Text(Artist):
+         """
+         super().__init__()
+         self._x, self._y = x, y
++        self._antialiased = None  # Default: per-instance antialiasing is unset
++
+         self._text = ''
+         self._reset_visual_defaults(
+             text=text,
+@@ -150,6 +166,11 @@ class Text(Artist):
+             linespacing=linespacing,
+             rotation_mode=rotation_mode,
+         )
++        # Handle antialiased from kwargs if present.
++        if 'antialiased' in kwargs:
++            self.set_antialiased(kwargs.pop('antialiased'))
++
++        # Do not override _antialiased when kwargs/init already set it.
+         self.update(kwargs)
+ 
+     def _reset_visual_defaults(
+@@ -192,6 +213,10 @@ class Text(Artist):
+         # docstring inherited
+         kwargs = cbook.normalize_kwargs(kwargs, Text)
+         sentinel = object()  # bbox can be None, so use another sentinel.
++        # Handle antialiased, update early.
++        antialiased_val = kwargs.pop('antialiased', None)
++        if antialiased_val is not None:
++            self.set_antialiased(antialiased_val)
+         # Update fontproperties first, as it has lowest priority.
+         fontproperties = kwargs.pop("fontproperties", sentinel)
+         if fontproperties is not sentinel:
+@@ -1613,6 +1638,7 @@ class Annotation(Text, _AnnotationBase):
+                  textcoords=None,
+                  arrowprops=None,
+                  annotation_clip=None,
++                 antialiased=None,
+                  **kwargs):
+         """
+         Annotate the point *xy* with text *text*.
+@@ -1817,6 +1843,8 @@ or callable, default: value of *xycoords*
+             self.arrow_patch = None
+ 
+         # Must come last, as some kwargs may be propagated to arrow_patch.
++        if antialiased is not None:
++            kwargs['antialiased'] = antialiased
+         Text.__init__(self, x, y, text, **kwargs)
+ 
+     @_api.rename_parameter("3.8", "event", "mouseevent")
+

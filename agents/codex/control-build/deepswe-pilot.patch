@@ -1,0 +1,48 @@
+--- a/codex-rs/core/src/session/tokenana_control.rs
++++ b/codex-rs/core/src/session/tokenana_control.rs
+@@ -21,6 +21,7 @@
+ 
+ pub(super) struct Control {
+     log: File,
++    timing: File,
+     used: u32,
+     initial: u32,
+     final_limit: u32,
+@@ -52,13 +53,16 @@
+             "gpt" => (50, 67),
+             "claude" => (52, 64),
+             "gemini" => (29, 45),
++            "deepswe_gpt" => (53, 74),
+             _ => return Err(failure("unknown budget profile")),
+         };
+         // Refuse a second native turn/restart instead of silently resetting the budget.
+         let log = OpenOptions::new().write(true).create_new(true)
+             .open(directory.join("control-events.jsonl")).map_err(failure)?;
+         let mut control = Self {
+-            log, used: 0, initial, final_limit, limit: initial, extended: false,
++            log, timing: OpenOptions::new().create(true).append(true)
++                .open(directory.join("timing.jsonl")).map_err(failure)?,
++            used: 0, initial, final_limit, limit: initial, extended: false,
+         };
+         control.record("initialized", Some(turn_id))?;
+         Ok(Some(control))
+@@ -81,6 +85,19 @@
+     }
+ 
+     pub(super) fn before_sampling(&mut self) -> CodexResult<TokenanaBudget> {
++        let started = std::time::Instant::now();
++        let result = self.before_sampling_inner();
++        let record = json!({"version": 1, "event": "end", "phase": "control_callback",
++            "seconds": started.elapsed().as_secs_f64(),
++            "utc_seconds": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
++                .map_err(failure)?.as_secs_f64()});
++        serde_json::to_writer(&mut self.timing, &record).map_err(failure)?;
++        self.timing.write_all(b"\n").map_err(failure)?;
++        self.timing.flush().map_err(failure)?;
++        result
++    }
++
++    fn before_sampling_inner(&mut self) -> CodexResult<TokenanaBudget> {
+         // This is reached only when native completion/stop checks request more work.
+         if self.used == self.limit && !self.extended {
+             self.limit = self.final_limit;

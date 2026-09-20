@@ -1,0 +1,29 @@
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index d69c24419b..7b497f86d6 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -1666,6 +1666,24 @@ class Query(BaseExpression):
+             filter_expr = (filter_lhs, OuterRef(filter_rhs.name))
+         # Generate the inner query.
+         query = Query(self.model)
++        # Re-apply FilteredRelations from names_with_path.
++        # names_with_path is a list of (annotation_name, [PathInfo...])
++        filtered_relation_annotations = {}
++        for name, _ in names_with_path:
++            if name in self.annotations:
++                annot = self.annotations[name]
++                # Only handle FilteredRelation for now
++                from django.db.models import FilteredRelation
++                if isinstance(annot, FilteredRelation):
++                    filtered_relation_annotations[name] = annot
++        if filtered_relation_annotations:
++            for alias, fr in filtered_relation_annotations.items():
++                query.add_filtered_relation(fr, alias)
++
++        query._filtered_relations = self._filtered_relations.copy()
++        query.annotations = self.annotations.copy()
++        query.annotation_select.clear()
++        query.annotation_select.update(self.annotation_select)
+         query.add_filter(filter_expr)
+         query.clear_ordering(True)
+         # Try to have as simple as possible subquery -> trim leading joins from

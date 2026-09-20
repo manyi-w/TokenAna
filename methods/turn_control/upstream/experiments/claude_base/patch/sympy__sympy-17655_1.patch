@@ -1,0 +1,89 @@
+diff --git a/sympy/geometry/point.py b/sympy/geometry/point.py
+index 7c978c47be..a4b2b68962 100644
+--- a/sympy/geometry/point.py
++++ b/sympy/geometry/point.py
+@@ -29,9 +29,10 @@
+ from sympy.functions.elementary.miscellaneous import sqrt
+ from sympy.functions.elementary.complexes import im
+ from sympy.matrices import Matrix
+-from sympy.core.numbers import Float
++from sympy.core.numbers import Float, Number
+ from sympy.core.evaluate import global_evaluate
+ from sympy.core.add import Add
++from sympy.core.mul import Mul
+ from sympy.utilities.iterables import uniq
+ from sympy.utilities.misc import filldedent, func_name, Undecidable
+ 
+@@ -104,6 +105,8 @@ class Point(GeometryEntity):
+     """
+ 
+     is_Point = True
++    # Give Point higher priority than numbers for operations
++    _op_priority = 11.0
+ 
+     def __new__(cls, *args, **kwargs):
+         evaluate = kwargs.get('evaluate', global_evaluate[0])
+@@ -213,6 +216,29 @@ def __add__(self, other):
+         sympy.geometry.point.Point.translate
+ 
+         """
++        # Handle the case where other is a Mul expression like factor * Point
++        if isinstance(other, Mul):
++            # Check if this is a scalar multiplication of a Point
++            point_args = [arg for arg in other.args if isinstance(arg, Point)]
++            numeric_args = [arg for arg in other.args if isinstance(arg, Number)]
++            expr_args = [arg for arg in other.args if not isinstance(arg, (Point, Number))]
++            
++            # If we have exactly one Point and only numeric/expression factors, handle it
++            if len(point_args) == 1:
++                point = point_args[0]
++                # Multiply all the factors together
++                factor_args = numeric_args + expr_args
++                if factor_args:
++                    factor = factor_args[0]
++                    for factor_i in factor_args[1:]:
++                        factor *= factor_i
++                    # Create the scaled point by using Point's __mul__ method
++                    scaled_point = point * factor
++                    return self.__add__(scaled_point)
++                else:
++                    # No factors, just add the point
++                    return self.__add__(point)
++        
+         try:
+             s, o = Point._normalize_dimension(self, Point(other, evaluate=False))
+         except TypeError:
+@@ -278,6 +304,33 @@ def __mul__(self, factor):
+         coords = [simplify(x*factor) for x in self.args]
+         return Point(coords, evaluate=False)
+ 
++    def __rmul__(self, factor):
++        """Multiply point's coordinates by a factor.
++
++        This method handles reverse multiplication where the factor
++        is on the left side of the Point (e.g., factor * point).
++        
++        Notes
++        =====
++
++        >>> from sympy.geometry.point import Point
++        >>> from sympy import sympify
++
++        This method allows left multiplication:
++
++        >>> sympify(2) * Point(1, 2)
++        Point2D(2, 4)
++        >>> sympify(2.5) * Point(1, 2)
++        Point2D(2.5, 5.0)
++
++        See Also
++        ========
++
++        sympy.geometry.point.Point.__mul__
++        sympy.geometry.point.Point.scale
++        """
++        return self.__mul__(factor)
++
+     def __neg__(self):
+         """Negate the point."""
+         coords = [-x for x in self.args]

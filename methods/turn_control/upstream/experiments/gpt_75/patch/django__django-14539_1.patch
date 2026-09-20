@@ -1,0 +1,27 @@
+diff --git a/django/utils/html.py b/django/utils/html.py
+index 3bc02b8dd3..ff52e44bfd 100644
+--- a/django/utils/html.py
++++ b/django/utils/html.py
+@@ -283,8 +283,19 @@ def urlize(text, trim_url_limit=None, nofollow=False, autoescape=False):
+             middle_unescaped = html.unescape(middle)
+             stripped = middle_unescaped.rstrip(TRAILING_PUNCTUATION_CHARS)
+             if middle_unescaped != stripped:
+-                trail = middle[len(stripped):] + trail
+-                middle = middle[:len(stripped) - len(middle_unescaped)]
++                # Only remove trailing punctuation if it doesn't break an HTML entity at the end
++                # e.g., do not strip inside '&lt' or '&amp' etc.
++                num_stripped = len(middle_unescaped) - len(stripped)
++                trailing = middle[-num_stripped:] if num_stripped > 0 else ''
++                # Now check if we're inside an entity:
++                ent_start = middle.rfind('&')
++                if ent_start != -1 and ent_start > len(middle) - num_stripped - 1:
++                    ent = middle[ent_start:]
++                    if not ent.endswith(';') and re.match(r'&[a-zA-Z0-9#]+$', ent):
++                        # We're stripping inside a non-terminated entity, abort
++                        return lead, middle, trail
++                trail = trailing + trail
++                middle = middle[:len(middle) - num_stripped]
+                 trimmed_something = True
+         return lead, middle, trail
+ 
+

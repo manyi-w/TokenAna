@@ -1,0 +1,29 @@
+diff --git a/django/db/models/sql/subqueries.py b/django/db/models/sql/subqueries.py
+index 04063f73bc..f223109c24 100644
+--- a/django/db/models/sql/subqueries.py
++++ b/django/db/models/sql/subqueries.py
+@@ -134,7 +134,22 @@ class UpdateQuery(Query):
+             query = UpdateQuery(model)
+             query.values = values
+             if self.related_ids is not None:
+-                query.add_filter("pk__in", self.related_ids)
++                # For multiple inheritance, we need to map child IDs to the correct parent IDs
++                if model in self.model._meta.parents:
++                    # Get the field that links to this parent model
++                    parent_link_field = self.model._meta.parents[model]
++                    
++                    # Create a subquery to get the correct parent IDs
++                    from django.db.models.sql.query import Query
++                    parent_id_query = Query(self.model)
++                    parent_id_query.add_fields([parent_link_field.name])
++                    parent_id_query.add_filter("pk__in", self.related_ids)
++                    
++                    # Use the subquery to filter the parent model
++                    query.add_filter("pk__in", parent_id_query)
++                else:
++                    # Fallback for regular inheritance (not multiple inheritance)
++                    query.add_filter("pk__in", self.related_ids)
+             result.append(query)
+         return result
+ 
+

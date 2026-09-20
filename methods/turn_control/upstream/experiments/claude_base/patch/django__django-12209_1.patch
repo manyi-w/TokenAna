@@ -1,0 +1,69 @@
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index e3b14a41a0..acdd3e4357 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -398,6 +398,8 @@ class ModelState:
+     # explicit (non-auto) PKs. This impacts validation only; it has no effect
+     # on the actual save.
+     adding = True
++    # If true, the primary key was explicitly set during instantiation.
++    pk_explicitly_set = False
+     fields_cache = ModelStateFieldsCacheDescriptor()
+ 
+ 
+@@ -465,6 +467,9 @@ class Model(metaclass=ModelBase):
+                 else:
+                     try:
+                         val = kwargs.pop(field.attname)
++                        # Check if this is the primary key field that was explicitly set
++                        if field.primary_key:
++                            self._state.pk_explicitly_set = True
+                     except KeyError:
+                         # This is done with an exception rather than the
+                         # default argument on pop because we don't want
+@@ -489,11 +494,24 @@ class Model(metaclass=ModelBase):
+             property_names = opts._property_names
+             for prop in tuple(kwargs):
+                 try:
++                    # Check if this is setting the primary key via 'pk' keyword
++                    if prop == 'pk':
++                        if kwargs[prop] is not _DEFERRED:
++                            _setattr(self, prop, kwargs[prop])
++                            self._state.pk_explicitly_set = True
++                        del kwargs[prop]
+                     # Any remaining kwargs must correspond to properties or
+                     # virtual fields.
+-                    if prop in property_names or opts.get_field(prop):
++                    elif prop in property_names or opts.get_field(prop):
+                         if kwargs[prop] is not _DEFERRED:
+                             _setattr(self, prop, kwargs[prop])
++                            # Check if this is setting the primary key via field name
++                            try:
++                                field = opts.get_field(prop)
++                                if field.primary_key:
++                                    self._state.pk_explicitly_set = True
++                            except FieldDoesNotExist:
++                                pass
+                         del kwargs[prop]
+                 except (AttributeError, FieldDoesNotExist):
+                     pass
+@@ -840,10 +858,10 @@ class Model(metaclass=ModelBase):
+                        if f.name in update_fields or f.attname in update_fields]
+ 
+         pk_val = self._get_pk_val(meta)
++        pk_set = pk_val is not None
+         if pk_val is None:
+             pk_val = meta.pk.get_pk_value_on_save(self)
+             setattr(self, meta.pk.attname, pk_val)
+-        pk_set = pk_val is not None
+         if not pk_set and (force_update or update_fields):
+             raise ValueError("Cannot force an update in save() with no primary key.")
+         updated = False
+@@ -851,6 +869,7 @@ class Model(metaclass=ModelBase):
+         if (
+             not force_insert and
+             self._state.adding and
++            not self._state.pk_explicitly_set and
+             self._meta.pk.default and
+             self._meta.pk.default is not NOT_PROVIDED
+         ):

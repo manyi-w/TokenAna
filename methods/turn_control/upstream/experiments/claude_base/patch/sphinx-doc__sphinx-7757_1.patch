@@ -1,0 +1,44 @@
+diff --git a/sphinx/util/inspect.py b/sphinx/util/inspect.py
+index 15f0d66e2..cc67fca0c 100644
+--- a/sphinx/util/inspect.py
++++ b/sphinx/util/inspect.py
+@@ -520,15 +520,35 @@ def signature_from_str(signature: str) -> inspect.Signature:
+     args = definition.args
+     params = []
+ 
++    # defaults in args.defaults correspond to the last len(args.defaults) arguments
++    # in the positional parameters (both positional-only and positional-or-keyword)
++    positional_only_count = len(getattr(args, "posonlyargs", []))
++    regular_args_count = len(args.args)
++    defaults_count = len(args.defaults)
++
++    # Calculate the number of arguments that have defaults
++    total_positional_count = positional_only_count + regular_args_count
++    defaults_start_index = total_positional_count - defaults_count
++
+     if hasattr(args, "posonlyargs"):
+-        for arg in args.posonlyargs:  # type: ignore
++        for i, arg in enumerate(args.posonlyargs):  # type: ignore
++            # Check if this positional-only argument has a default value
++            if i >= defaults_start_index:
++                default_index = i - defaults_start_index
++                default = ast_unparse(args.defaults[default_index])
++            else:
++                default = Parameter.empty
++
+             annotation = ast_unparse(arg.annotation) or Parameter.empty
+             params.append(Parameter(arg.arg, Parameter.POSITIONAL_ONLY,
+-                                    annotation=annotation))
++                                    default=default, annotation=annotation))
+ 
+     for i, arg in enumerate(args.args):
+-        if len(args.args) - i <= len(args.defaults):
+-            default = ast_unparse(args.defaults[-len(args.args) + i])
++        # Check if this regular argument has a default value
++        arg_index = positional_only_count + i
++        if arg_index >= defaults_start_index:
++            default_index = arg_index - defaults_start_index
++            default = ast_unparse(args.defaults[default_index])
+         else:
+             default = Parameter.empty
+ 

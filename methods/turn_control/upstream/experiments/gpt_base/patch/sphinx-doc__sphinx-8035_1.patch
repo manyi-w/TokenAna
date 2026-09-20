@@ -1,0 +1,107 @@
+diff --git a/sphinx/ext/autodoc/__init__.py b/sphinx/ext/autodoc/__init__.py
+index 8c3509c3b..da44cb9ee 100644
+--- a/sphinx/ext/autodoc/__init__.py
++++ b/sphinx/ext/autodoc/__init__.py
+@@ -532,6 +532,15 @@ class Documenter:
+ 
+     def get_object_members(self, want_all: bool) -> Tuple[bool, List[Tuple[str, Any]]]:
+         """Return `(members_check_module, members)` where `members` is a
++            # FORCE want_all if private-members is used (for correct collection)
++            private_members = getattr(self.options, 'private_members', None)
++            private_list = []
++            if isinstance(private_members, list):
++                private_list = private_members
++            elif private_members not in (None, True):
++                private_list = [x.strip() for x in str(private_members).split(',') if x.strip()]
++            if private_list:
++                want_all = True
+         list of `(membername, member)` pairs of the members of *self.object*.
+ 
+         If *want_all* is True, return all members.  Else, only return those
+@@ -541,14 +550,28 @@ class Documenter:
+         if not want_all:
+             if not self.options.members:
+                 return False, []
+-            # specific members given
++            # PATCH: support private-members arg list even if members is empty
++            private_members = self.options.private_members if hasattr(self.options, 'private_members') else None
++            private_list = []
++            from sphinx.util.inspect import safe_getattr
++            if isinstance(private_members, list):
++                private_list = private_members
++            elif private_members is not None and private_members is not True:
++                private_list = [x.strip() for x in str(private_members).split(',') if x.strip()]
++            # Always consider both explicit public and private members
++            all_names = []
++            for n in (list(self.options.members) if self.options.members else []):
++                if n not in all_names:
++                    all_names.append(n)
++            for n in private_list:
++                if n not in all_names:
++                    all_names.append(n)
+             selected = []
+-            for name in self.options.members:
++            for name in all_names:
+                 if name in members:
+                     selected.append((name, members[name].value))
+                 else:
+-                    logger.warning(__('missing attribute %s in object %s') %
+-                                   (name, self.fullname), type='autodoc')
++                    logger.warning(__('missing attribute %s in object %s') % (name, self.fullname), type='autodoc')
+             return False, selected
+         elif self.options.inherited_members:
+             return False, [(m.name, m.value) for m in members.values()]
+@@ -625,6 +648,16 @@ class Documenter:
+             else:
+                 isprivate = membername.startswith('_')
+ 
++            # --- PATCH: Selective private-members
++            private_members = self.options.private_members
++            private_list = None
++            if isinstance(private_members, list):
++                private_list = private_members
++            elif private_members is ALL or private_members is True:
++                private_list = None  # Means include all privates
++            else:
++                private_list = [x.strip() for x in str(private_members).split(',') if x.strip()]
++
+             keep = False
+             if safe_getattr(member, '__sphinx_mock__', False):
+                 # mocked module or object
+@@ -654,10 +687,15 @@ class Documenter:
+                     # keep documented attributes
+                     keep = True
+                 isattr = True
++            elif private_list is not None and isprivate:
++                # Only include if in private_list AND not meta-public:
++                if membername in (private_list or []) and not ('public' in metadata):
++                    keep = (has_doc or self.options.undoc_members)
++                else:
++                    keep = False
+             elif want_all and isprivate:
+-                # ignore members whose name starts with _ by default
+-                keep = self.options.private_members and \
+-                    (has_doc or self.options.undoc_members)
++                # All private members (unless meta-public) if general flag
++                keep = not ('public' in metadata) and (has_doc or self.options.undoc_members)
+             else:
+                 if self.options.members is ALL and is_filtered_inherited_member(membername):
+                     keep = False
+@@ -859,7 +897,7 @@ class ModuleDocumenter(Documenter):
+         'show-inheritance': bool_option, 'synopsis': identity,
+         'platform': identity, 'deprecated': bool_option,
+         'member-order': member_order_option, 'exclude-members': members_set_option,
+-        'private-members': bool_option, 'special-members': members_option,
++        'private-members': members_option, 'special-members': members_option,
+         'imported-members': bool_option, 'ignore-module-all': bool_option
+     }  # type: Dict[str, Callable]
+ 
+@@ -1279,7 +1317,7 @@ class ClassDocumenter(DocstringSignatureMixin, ModuleLevelDocumenter):  # type:
+         'noindex': bool_option, 'inherited-members': inherited_members_option,
+         'show-inheritance': bool_option, 'member-order': member_order_option,
+         'exclude-members': members_set_option,
+-        'private-members': bool_option, 'special-members': members_option,
++        'private-members': members_option, 'special-members': members_option,
+     }  # type: Dict[str, Callable]
+ 
+     _signature_class = None  # type: Any

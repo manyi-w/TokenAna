@@ -1,0 +1,96 @@
+diff --git a/django/db/models/expressions.py b/django/db/models/expressions.py
+index d913658291..e3e1fe0bed 100644
+--- a/django/db/models/expressions.py
++++ b/django/db/models/expressions.py
+@@ -480,6 +480,91 @@ class CombinedExpression(SQLiteNumericMixin, Expression):
+         c.rhs = c.rhs.resolve_expression(query, allow_joins, reuse, summarize, for_save)
+         return c
+ 
++    def _resolve_output_field(self):
++        """
++        Attempt to infer the output type of the expression. Handle temporal
++        operations that combine different field types but are valid.
++        """
++        source_fields = self.get_source_fields()
++        sources_iter = (source for source in source_fields if source is not None)
++        for output_field in sources_iter:
++            for source in sources_iter:
++                if not isinstance(output_field, source.__class__):
++                    # Check if this is a valid temporal operation
++                    if self._is_valid_temporal_operation(output_field, source):
++                        return self._get_temporal_output_field(output_field, source)
++                    
++                    raise FieldError(
++                        'Expression contains mixed types: %s, %s. You must '
++                        'set output_field.' % (
++                            output_field.__class__.__name__,
++                            source.__class__.__name__,
++                        )
++                    )
++            return output_field
++
++    def _is_valid_temporal_operation(self, field1, field2):
++        """
++        Check if the combination of two fields represents a valid temporal operation.
++        Only handle mixed-type operations, let simple cases go through existing logic.
++        """
++        from django.db.models import fields
++        
++        datetime_fields = {fields.DateField, fields.DateTimeField, fields.TimeField}
++        duration_field = fields.DurationField
++        
++        # Get the field classes
++        field1_class = field1.__class__
++        field2_class = field2.__class__
++        
++        # Only handle mixed-type temporal operations
++        # Simple datetime - datetime should go through TemporalSubtraction
++        if (field1_class in datetime_fields and field2_class in datetime_fields):
++            # Let the existing TemporalSubtraction logic handle this
++            return False
++            
++        # Handle mixed temporal operations:
++        # duration + datetime = datetime
++        if (field1_class == duration_field and field2_class in datetime_fields):
++            return self.connector == self.ADD
++            
++        # datetime +/- duration = datetime
++        if (field1_class in datetime_fields and field2_class == duration_field):
++            return self.connector in (self.ADD, self.SUB)
++            
++        # duration +/- duration = duration
++        if (field1_class == duration_field and field2_class == duration_field):
++            return self.connector in (self.ADD, self.SUB)
++            
++        return False
++
++    def _get_temporal_output_field(self, field1, field2):
++        """
++        Determine the output field type for a valid temporal operation.
++        """
++        from django.db.models import fields
++        
++        datetime_fields = {fields.DateField, fields.DateTimeField, fields.TimeField}
++        duration_field = fields.DurationField
++        
++        field1_class = field1.__class__
++        field2_class = field2.__class__
++        
++        # duration + datetime = datetime
++        if (field1_class == duration_field and field2_class in datetime_fields):
++            return field2
++            
++        # datetime +/- duration = datetime
++        if (field1_class in datetime_fields and field2_class == duration_field):
++            return field1
++            
++        # duration +/- duration = duration
++        if (field1_class == duration_field and field2_class == duration_field):
++            return fields.DurationField()
++        
++        # This shouldn't happen if _is_valid_temporal_operation returned True
++        return None
++
+ 
+ class DurationExpression(CombinedExpression):
+     def compile(self, side, compiler, connection):

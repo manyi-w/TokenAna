@@ -1,0 +1,47 @@
+diff --git a/django/db/models/query.py b/django/db/models/query.py
+index 5c78c6e315..a0fa901eeb 100644
+--- a/django/db/models/query.py
++++ b/django/db/models/query.py
+@@ -993,6 +993,10 @@ class QuerySet:
+         query.annotations = {}
+         with transaction.mark_for_rollback_on_error(using=self.db):
+             rows = query.get_compiler(self.db).execute_sql(CURSOR)
++            # Also run UPDATEs for related parents as needed.
++            for related_update in getattr(query, 'get_related_updates', lambda: [])():
++                related_update.get_compiler(self.db).execute_sql(CURSOR)
++
+         self._result_cache = None
+         return rows
+ 
+diff --git a/django/db/models/sql/subqueries.py b/django/db/models/sql/subqueries.py
+index 04063f73bc..37fa647277 100644
+--- a/django/db/models/sql/subqueries.py
++++ b/django/db/models/sql/subqueries.py
+@@ -133,7 +133,26 @@ class UpdateQuery(Query):
+         for model, values in self.related_updates.items():
+             query = UpdateQuery(model)
+             query.values = values
+-            if self.related_ids is not None:
++            # Restrict the update to only parent rows referenced by the current queryset
++            parent_ptr_field = None
++            for f in self.model._meta.get_fields(include_hidden=True):
++                if f.is_relation and f.related_model is model and getattr(f, 'parent_link', False):
++                    parent_ptr_field = f
++                    break
++            if parent_ptr_field is not None:
++                # Get all relevant parent PKs
++                # Use only the objects matching current queryset (self.where) for parent update
++                from django.db.models.sql.where import WhereNode
++                filters = self.where.clone() if isinstance(self.where, WhereNode) else self.where
++                qs = self.model._default_manager.filter()
++                qs.query.where = filters
++                # Find pointer field name from Child to this Parent
++                pointer_field_name = parent_ptr_field.attname
++                parent_ids = list(qs.values_list(pointer_field_name, flat=True))
++                print(f'For parent {model.__name__}, using parent_ids from child pointer {pointer_field_name}:', parent_ids)
++                # Use the parent's own PK column for the filter
++                query.add_filter(f'{model._meta.pk.name}__in', parent_ids)
++            elif self.related_ids is not None:
+                 query.add_filter("pk__in", self.related_ids)
+             result.append(query)
+         return result

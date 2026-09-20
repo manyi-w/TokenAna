@@ -1,0 +1,52 @@
+diff --git a/sphinx/ext/inheritance_diagram.py b/sphinx/ext/inheritance_diagram.py
+index 6e3985512..a0e64c41e 100644
+--- a/sphinx/ext/inheritance_diagram.py
++++ b/sphinx/ext/inheritance_diagram.py
+@@ -412,12 +412,45 @@ def html_visit_inheritance_diagram(self: HTML5Translator, node: inheritance_diag
+     pending_xrefs = cast(Iterable[addnodes.pending_xref], node)
+     for child in pending_xrefs:
+         if child.get('refuri') is not None:
++            refuri = child.get('refuri')
+             if graphviz_output_format == 'SVG':
+-                urls[child['reftitle']] = "../" + child.get('refuri')
++                # For SVG, links need to be relative to the _images directory.
++                # The refuri is relative to the current document, but we need it relative 
++                # to the document root (since _images is at the root level).
++                
++                # If refuri is absolute (starts with '/'), use as-is but remove leading '/'
++                if refuri.startswith('/'):
++                    target_uri = refuri[1:]  # Remove leading '/'
++                else:
++                    # refuri is relative to current document, make it relative to document root
++                    from pathlib import Path
++                    # Get the directory of the current document
++                    current_dir = str(Path(self.builder.current_docname).parent)
++                    if current_dir == '.':
++                        # Document is in root directory
++                        target_uri = refuri
++                    else:
++                        # Document is in subdirectory, resolve the relative path
++                        # Normalize '..' components manually for reliable cross-platform behavior
++                        combined_path = current_dir + '/' + refuri
++                        parts = combined_path.split('/')
++                        normalized_parts = []
++                        for part in parts:
++                            if part == '..':
++                                if normalized_parts:
++                                    normalized_parts.pop()
++                            elif part and part != '.':
++                                normalized_parts.append(part)
++                        target_uri = '/'.join(normalized_parts)
++                
++                # Now make it relative to _images directory (add '../' to get out of _images)
++                urls[child['reftitle']] = "../" + target_uri
+             else:
+-                urls[child['reftitle']] = child.get('refuri')
++                urls[child['reftitle']] = refuri
+         elif child.get('refid') is not None:
+             if graphviz_output_format == 'SVG':
++                # For SVG, the link needs to be relative to the _images directory
++                # Calculate path from _images/ to the current document
+                 urls[child['reftitle']] = '../' + current_filename + '#' + child.get('refid')
+             else:
+                 urls[child['reftitle']] = '#' + child.get('refid')

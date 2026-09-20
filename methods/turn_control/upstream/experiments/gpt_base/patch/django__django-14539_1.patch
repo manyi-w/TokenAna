@@ -1,0 +1,40 @@
+diff --git a/django/utils/html.py b/django/utils/html.py
+index 3bc02b8dd3..3cf1d59e03 100644
+--- a/django/utils/html.py
++++ b/django/utils/html.py
+@@ -280,11 +280,30 @@ def urlize(text, trim_url_limit=None, nofollow=False, autoescape=False):
+             # Trim trailing punctuation (after trimming wrapping punctuation,
+             # as encoded entities contain ';'). Unescape entities to avoid
+             # breaking them by removing ';'.
+-            middle_unescaped = html.unescape(middle)
+-            stripped = middle_unescaped.rstrip(TRAILING_PUNCTUATION_CHARS)
+-            if middle_unescaped != stripped:
+-                trail = middle[len(stripped):] + trail
+-                middle = middle[:len(stripped) - len(middle_unescaped)]
++            # Improved trailing punctuation stripper to be entity-aware
++            orig = middle
++            i = len(middle)
++            while i > 0:
++                # Check for HTML entity ending at i
++                if middle[i-1] == ';':
++                    # look for entity start
++                    ent_start = middle.rfind('&', 0, i-1)
++                    if ent_start != -1:
++                        entity = middle[ent_start:i]
++                        unesc = html.unescape(entity)
++                        # Only treat it as entity if it actually changes something
++                        if len(unesc) == 1 and unesc in TRAILING_PUNCTUATION_CHARS:
++                            i = ent_start
++                            continue
++                # Otherwise, single character
++                unesc = html.unescape(middle[i-1:i])
++                if unesc in TRAILING_PUNCTUATION_CHARS:
++                    i -= 1
++                    continue
++                break
++            if i < len(middle):
++                trail = middle[i:] + trail
++                middle = middle[:i]
+                 trimmed_something = True
+         return lead, middle, trail
+ 

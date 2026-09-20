@@ -1,0 +1,45 @@
+diff --git a/sympy/matrices/expressions/blockmatrix.py b/sympy/matrices/expressions/blockmatrix.py
+index 95302a05ca..f09f052f4f 100644
+--- a/sympy/matrices/expressions/blockmatrix.py
++++ b/sympy/matrices/expressions/blockmatrix.py
+@@ -164,7 +164,10 @@ def structurally_equal(self, other):
+     def _blockmul(self, other):
+         if (isinstance(other, BlockMatrix) and
+                 self.colblocksizes == other.rowblocksizes):
+-            return BlockMatrix(self.blocks*other.blocks)
++            from sympy import MatAdd, Matrix
++            res = Matrix(self.blockshape[0], other.blockshape[1], lambda i, j:
++                MatAdd(*[self.blocks[i, k] * other.blocks[k, j] for k in range(self.blockshape[1])]).doit())
++            return BlockMatrix(res)
+ 
+         return self * other
+ 
+diff --git a/sympy/matrices/expressions/matmul.py b/sympy/matrices/expressions/matmul.py
+index 15e81976d0..2c0db6454e 100644
+--- a/sympy/matrices/expressions/matmul.py
++++ b/sympy/matrices/expressions/matmul.py
+@@ -110,6 +110,14 @@ def as_coeff_mmul(self):
+         coeff, matrices = self.as_coeff_matrices()
+         return coeff, MatMul(*matrices)
+ 
++    def _eval_mul(self, other):
++        if any(isinstance(arg, ZeroMatrix) for arg in self.args) or \
++           isinstance(other, ZeroMatrix):
++            from .zeromatrix import ZeroMatrix
++            return ZeroMatrix(self.rows, other.cols if other.is_Matrix else self.cols)
++        return None
++
++
+     def _eval_transpose(self):
+         """Transposition of matrix multiplication.
+ 
+@@ -219,8 +227,7 @@ def newmul(*args):
+ def any_zeros(mul):
+     if any([arg.is_zero or (arg.is_Matrix and arg.is_ZeroMatrix)
+                        for arg in mul.args]):
+-        matrices = [arg for arg in mul.args if arg.is_Matrix]
+-        return ZeroMatrix(matrices[0].rows, matrices[-1].cols)
++        return ZeroMatrix(mul.rows, mul.cols)
+     return mul
+ 
+ def merge_explicit(matmul):
