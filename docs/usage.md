@@ -53,6 +53,8 @@ python -B -m tokenAna study experiments/paper.toml --runs runs/paper-run --outpu
 
 请求/响应、原生轨迹、方法前后快照、模型配置、价格、补丁和评测记录均保留。归档验证失败时容器保留；查看 retention.json、controller.json、channel-volumes.jsonl，不擅自清理尚未确认完整的证据。
 
+部分已结束试跑的完整容器和逐请求文件系统归档已按用户要求清理。恢复旧环境前检查 retention.json 的 archive_cleanup：full_filesystem_restore_available=false 表示这些副本已删除；原 complete 字段仅记录归档创建时的结果。此清理不影响按源码和配置重新运行实验。
+
 ## 运行前检查
 
 使用前文的 study 展开和 --dry-run 检查固定矩阵与配置；这些入口不调用模型，也不表示真实组件验收完成。开发期测试、专用验证脚本及模拟产物在确认通过后已清理。
