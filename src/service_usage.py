@@ -32,7 +32,7 @@ def record_service(artifacts, *, purpose='compression_service', model=None,
     root.mkdir(exist_ok=True)
     path = root / (uuid4().hex + '.json')
     record = {'version': 1, 'attribution': attribution, 'model': model,
-              'inference': inference, 'complete': False}
+              'inference': inference, 'complete': False, 'started_at': time.time()}
     write_json(path, record)
     result = {}
     started = time.monotonic()
@@ -43,12 +43,13 @@ def record_service(artifacts, *, purpose='compression_service', model=None,
         record['error_type'] = type(error).__name__
         raise
     finally:
-        record.update({key: result[key] for key in ('raw_usage', 'protocol', 'provider', 'effects') if key in result})
+        record.update({key: result[key] for key in ('raw_usage', 'protocol', 'provider', 'effects', 'local_compute') if key in result})
         record['duration_sec'] = time.monotonic() - started
+        record['finished_at'] = time.time()
         write_json(path, record)
 
 
-def read_services(directory, *, case_id, attempt_id, call_id):
+def read_services(directory, *, case_id, attempt_id, call_id, local_compute=None):
     observations, operations, issues = [], [], []
     for path in sorted(Path(directory).glob('*.json')):
         data, attr = {}, {}
@@ -56,6 +57,12 @@ def read_services(directory, *, case_id, attempt_id, call_id):
         local = []
         try:
             data = json.loads(path.read_text())
+            if local_compute is not None and isinstance(data, dict) and (
+                    data.get('local_compute') or (data.get('inference') and
+                    data.get('attribution', {}).get('purpose') == 'compression_service')):
+                local_compute.append({'source': str(path), 'compute': data.get('local_compute'),
+                    'duration_sec': data.get('duration_sec'), 'complete': data.get('complete'),
+                    'model': data.get('model'), 'effects': data.get('effects'), 'pricing': 'unpriced'})
             if not isinstance(data, dict) or data.get('version') != 1 or type(data.get('inference')) is not bool:
                 raise ValueError('invalid service record')
             attr = validate_attribution(data['attribution'])
@@ -68,16 +75,20 @@ def read_services(directory, *, case_id, attempt_id, call_id):
             if not data.get('complete'):
                 local.append('service operation incomplete')
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+            if local_compute is not None and isinstance(error, (OSError, json.JSONDecodeError, UnicodeError)):
+                local_compute.append({'source': str(path), 'compute': None, 'complete': False})
             if not isinstance(data, dict):
                 data = {}
             local.append(f'unreadable service record ({type(error).__name__})')
         purpose = attr.get('purpose', 'unknown')
         model, parent = data.get('model'), attr.get('parent_call_id')
+        context = {key: data.get(key) for key in ('provider', 'protocol')}
         if data.get('inference', True):
             observations.append(UsageObservation(case_id, attempt_id, call_id, path.stem,
-                metrics, str(path), data.get('raw_usage') or {}, {}, purpose, model, parent, path.stem))
+                metrics, str(path), data.get('raw_usage') or {}, {}, purpose, model, parent, path.stem, context))
         operations.append(UsageOperation(case_id, attempt_id, call_id, path.stem,
-            purpose, model, parent, 'service', duration(data), bool(data.get('complete')), local))
+            purpose, model, parent, 'service', duration(data), bool(data.get('complete')), local,
+            data.get('inference', True), context))
         issues.extend(f'{path}: {reason}' for reason in local)
     # Service operations represent actual attempted work even when backend usage is unknown.
     return CaseUsage(case_id, bool(observations), observations, not issues, issues, operations)

@@ -9,7 +9,7 @@ from pathlib import Path
 import time
 
 from src.method_sessions import SessionMethod, artifacts, chat_steps, save_state, source_metrics, author_metrics
-from src.method_transport import post_json, validate_endpoint
+from src.method_transport import post_json, validate_endpoint, ServiceHTTPError
 from src.service_usage import record_service
 from src.session import SessionDecision
 from src.source_declarations import declarations
@@ -47,12 +47,19 @@ class AttnCompress(SessionMethod):
         def service(payload):
             try:
                 with record_service(artifacts(current), parent_call_id=current.details.get('usage_identity', {}).get('call_id', 'main'), identity=current.details.get('usage_identity', {})) as record:
-                    result = transport(options['service_base_url'], '/compress', payload,
-                        artifacts=artifacts(current), channel='attn-compress', timeout=options.get('timeout', 600))
+                    try:
+                        result = transport(options['service_base_url'], '/compress', payload,
+                            artifacts=artifacts(current), channel='attn-compress', timeout=options.get('timeout', 600))
+                    except ServiceHTTPError as error:
+                        if isinstance(error.payload, dict) and 'local_compute' in error.payload:
+                            record['local_compute'] = error.payload['local_compute']
+                        raise
                     if result.get('usage') is not None:
                         # Require an explicit usage protocol; never interpret text stats as inference.
                         record.update(raw_usage=result['usage'], protocol=result['usage_protocol'], provider=result.get('provider'))
                     record['effects'] = result.get('stats', {})
+                    if 'local_compute' in result:
+                        record['local_compute'] = result['local_compute']
                     messages = result.get('compressed_messages') or []
                     for index, (before, after) in enumerate(zip(payload['messages'], messages)):
                         step = payload['step_indices'][index]

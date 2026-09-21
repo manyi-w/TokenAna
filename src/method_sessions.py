@@ -5,7 +5,6 @@ from pathlib import Path
 
 from .interfaces import ArtifactDirectory, MethodResult
 from .records import write_json
-from .session import SessionDecision
 
 
 class SessionMethod:

@@ -120,7 +120,7 @@ def recording_proxy(directory: Path, upstream_base_url: str, *, timeout: float =
                         "request_headers": _headers(self.headers.items()),
                         "upstream_path": base + suffix, "protocol": protocol,
                         "provider": provider, "attribution": dict(attribution),
-                        "response_complete": False, "status": None}
+                        "response_complete": False, "status": None, "forwarded_at": None}
             started = time.monotonic()
             _save(output / "metadata.json", metadata)
             connection_type = HTTPSConnection if upstream.scheme == "https" else HTTPConnection
@@ -160,6 +160,7 @@ def recording_proxy(directory: Path, upstream_base_url: str, *, timeout: float =
                            if key.lower() not in HOP_HEADERS | connection_headers}
                 headers["Connection"] = "close"
                 metadata['forwarded_at'] = time.time()
+                _save(output / 'metadata.json', metadata)
                 conn.request("POST", metadata["upstream_path"], body=body, headers=headers)
                 response = conn.getresponse()
                 metadata.update(status=response.status,

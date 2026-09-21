@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import sys
 
-from controlled_runner import (SelectedClient, SelectedTrae, ControlledTrae, SelectedConsole,
+from controlled_runner import (SelectedTrae, ControlledTrae, SelectedConsole,
     CachedAnthropic, DirectChatProvider, Config, TrajectoryRecorder, AgentState)
 from trae_agent.utils.llm_clients.openai_client import OpenAIClient
 from trae_agent.utils.llm_clients.openai_compatible_base import OpenAICompatibleClient

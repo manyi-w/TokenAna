@@ -1,9 +1,14 @@
 """AgentDiet source declarations with explicit recorded helper dependency."""
 from collections import defaultdict
-from dataclasses import replace
 import importlib.util
 from pathlib import Path
 import re
+import json
+import hashlib
+import os
+import time
+from typing import Optional
+from uuid import uuid4
 
 from src.method_sessions import SessionMethod, artifacts, chat_steps, save_state, source_metrics, author_metrics
 from src.method_transport import post_json, validate_endpoint, ServiceHTTPError
@@ -51,11 +56,29 @@ class AgentDiet(SessionMethod):
                     content = ''.join(block['text'] for block in content)
                 wire.append({**message, 'content': content})
             try:
-                response = transport(options['helper_base_url'], '/chat/completions',
-                    {'model': model, 'messages': wire, 'n': 1, 'reasoning_effort': 'low', 'max_completion_tokens': 8192},
-                    artifacts=artifacts(current), channel='agent-diet', protocol='chat_completions', model=model,
-                    api_key_env=options['helper_api_key_env'], timeout=options.get('timeout', 120),
-                    identity={**current.details.get('usage_identity', {}), 'parent_call_id': current.details.get('usage_identity', {}).get('call_id', 'main')})
+                if transport is post_json:
+                    # Execute the author's exact wrapper, including its outer
+                    # retry loop and the original SDK's own HTTP retry policy.
+                    import openai
+                    from src.usage_proxy import recording_proxy
+                    ns = declarations(SOURCE.parent / 'utils/llm_polytool.py',
+                        ['HashKey', 'NullCache', 'send_request_openai'],
+                        {'json': json, 'hashlib': hashlib, 'Optional': Optional, 'openai': openai, 'time': time})
+                    ns['llm_cache_chat'] = ns['NullCache']()
+                    destination = artifacts(current).host / 'auxiliary-records' / ('agent-diet-' + uuid4().hex)
+                    with recording_proxy(destination, options['helper_base_url'], protocol='chat_completions',
+                            provider='openai', attribution={**current.details.get('usage_identity', {}),
+                            'purpose': 'method_auxiliary', 'parent_call_id': current.details.get('usage_identity', {}).get('call_id', 'main')}) as endpoint:
+                        response = ns['send_request_openai'](endpoint, os.environ[options['helper_api_key_env']])(
+                            model, wire, tools, kwargs)
+                    if response is None:
+                        raise RuntimeError('no response from api')
+                else:
+                    response = transport(options['helper_base_url'], '/chat/completions',
+                        {'model': model, 'messages': wire, 'n': 1, 'reasoning_effort': 'low', 'max_tokens': 8192},
+                        artifacts=artifacts(current), channel='agent-diet', protocol='chat_completions', model=model,
+                        api_key_env=options['helper_api_key_env'], timeout=options.get('timeout', 120),
+                        identity={**current.details.get('usage_identity', {}), 'parent_call_id': current.details.get('usage_identity', {}).get('call_id', 'main')})
             except ServiceHTTPError:
                 state['helper_error'] = 'ServiceHTTPError'
                 raise

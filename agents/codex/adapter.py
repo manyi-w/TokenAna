@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 from src.interfaces import AgentResult, ArtifactDirectory, Workspace
 from src.components import ConfigError
+from src.raw_usage import read_case_usage, read_case_usage_views
 from src.models import ModelConfig
 from src.patches import patch_capture_command
 from src.workspaces import execution_timeout
@@ -57,6 +58,9 @@ class WorkspaceCaller(AgentCaller):
 
 
 class Codex:
+    read_case_usage = staticmethod(read_case_usage)
+    read_case_usage_views = staticmethod(read_case_usage_views)
+
     model_protocols = ("responses", "chat_completions")
     raw_usage_protocols = model_protocols
     session_capabilities = ("events", "replace_history", "state", "reminder", "terminate")
@@ -94,11 +98,6 @@ class Codex:
         if options.get("wire_api") == "chat_completions":
             from .session_runner import validate_options
             validate_options(options)
-
-    def read_case_usage(self, directory, **identity):
-        from src.raw_usage import read_raw_usage
-
-        return read_raw_usage(directory / "api-records", **identity)
 
     def read_original_case(self, directory, case_id):
         from src.accounting import OriginalCase

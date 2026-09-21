@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from src.method_sessions import SessionMethod, artifacts, save_state, tool_call, source_metrics
-from src.method_transport import post_json, validate_endpoint
+from src.method_transport import post_json, validate_endpoint, ServiceHTTPError
 from src.records import write_json
 from src.service_usage import record_service
 from src.source_declarations import declarations
@@ -67,8 +67,14 @@ class SwePrunerPro(SessionMethod):
             def post(self, url, json, timeout):
                 output = artifacts(current)
                 with record_service(output, model=MODEL, parent_call_id=current.details.get('usage_identity', {}).get('call_id', 'main'), inference=False, identity=current.details.get('usage_identity', {})) as operation:
-                    data = transport(options['service_base_url'], '/prune', json, artifacts=output,
-                                     channel='swe-pruner', timeout=timeout)
+                    failure = None
+                    try:
+                        data = transport(options['service_base_url'], '/prune', json, artifacts=output,
+                                         channel='swe-pruner', timeout=timeout)
+                    except ServiceHTTPError as error:
+                        if not isinstance(error.payload, dict):
+                            raise
+                        failure, data = error, error.payload
                     descriptor = data.get('tokenana', {})
                     if (descriptor.get('version') != SERVICE_VERSION or descriptor.get('backbone') != MODEL
                             or descriptor.get('backend_base_url', '').rstrip('/') != options['backend_base_url'].rstrip('/')
@@ -82,9 +88,20 @@ class SwePrunerPro(SessionMethod):
                             'version': 1, 'attribution': {**current.details.get('usage_identity', {}), 'purpose': 'compression_service', 'parent_call_id': current.details.get('usage_identity', {}).get('call_id', 'main')},
                             'model': MODEL, 'inference': True, 'complete': bool(record.get('complete')),
                             'duration_sec': record.get('duration_sec'), 'protocol': 'chat_completions',
+                            'started_at': record.get('started_at'), 'finished_at': record.get('finished_at'),
                             'provider': 'openai', 'raw_usage': record.get('usage'),
+                            'local_compute': record.get('local_compute') or {'version': 'local-backend-v1', 'input_tokens': record.get('input_tokens'),
+                                'submitted_input_tokens': record.get('submitted_input_tokens'),
+                                'forward_count': record.get('forward_count'), 'model': MODEL,
+                                'tokenizer': record.get('tokenizer'), 'complete': False,
+                                'duration_sec': record.get('duration_sec'), 'pricing': 'unpriced'},
                             'effects': {'backend_meta': record.get('meta_info'), 'error_type': record.get('error_type')}})
                     operation['effects'] = {key: data.get(key) for key in ('original_tokens', 'pruned_tokens', 'original_chars', 'pruned_chars')}
+                    if 'head_compute' in data:
+                        operation['local_compute'] = data['head_compute']
+                    if failure:
+                        failure.backend_evidence_saved = True
+                        raise failure
                 return SimpleNamespace(raise_for_status=lambda: None, json=lambda: data)
 
         # Reuse the original client's length check, payload and response handling.
@@ -144,8 +161,9 @@ class SwePrunerPro(SessionMethod):
                                 raise
                             except Exception as error:
                                 state['results'].append({'id': message.id, 'error': type(error).__name__})
-                                with record_service(artifacts(event), model=MODEL, identity=event.details.get('usage_identity', {})) as missing:
-                                    missing['effects'] = {'error_type': type(error).__name__, 'backend_request_status': 'unknown'}
+                                if not getattr(error, 'backend_evidence_saved', False):
+                                    with record_service(artifacts(event), model=MODEL, identity=event.details.get('usage_identity', {})) as missing:
+                                        missing['effects'] = {'error_type': type(error).__name__, 'backend_request_status': 'unknown'}
                                 # Preserve the author's raw-output failure fallback.
                     converted['content'] = history[index].text
                     native_history.append(converted)

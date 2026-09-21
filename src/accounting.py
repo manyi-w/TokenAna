@@ -5,8 +5,8 @@ aggregate), preserve raw files, and report coverage gaps. This module never gues
 trace semantics, retries a model, or substitutes a caller's estimated token count.
 """
 
-from dataclasses import dataclass, field
-from typing import Any, Mapping, Protocol, Sequence
+from dataclasses import asdict, dataclass, field
+from typing import Any, Mapping, Sequence
 
 
 METRICS = ("total", "input", "output", "cache_read", "cache_write", "reasoning")
@@ -33,6 +33,7 @@ class UsageObservation:
     model: str | None = None
     parent_call_id: str | None = None
     operation_id: str | None = None
+    billing_context: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,8 @@ class UsageOperation:
     duration_sec: float | None = None
     complete: bool = True
     issues: Sequence[str] = ()
+    inference: bool = True
+    billing_context: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -83,10 +86,6 @@ class OriginalCase:
     patch: str | None
     final_summary: FinalSummary | None = None
     method_data: Mapping[str, Any] = field(default_factory=dict)
-
-
-class OriginalAccounting(Protocol):
-    def original_accounting(self, cases: Sequence[OriginalCase]) -> dict: ...
 
 
 def _count(value: Any, name: str) -> int | None:
@@ -128,20 +127,25 @@ def normalize_openai_usage(raw: Mapping[str, Any]) -> dict[str, int | None]:
         if reasoning > out:
             raise ValueError("reasoning exceeds output")
         metrics["ordinary_output"] = out - reasoning
+    for prefix, details, names in (
+        ('input', incoming, ('text_tokens', 'image_tokens', 'audio_tokens')),
+        ('output', outgoing, ('text_tokens', 'image_tokens', 'audio_tokens',
+                              'accepted_prediction_tokens', 'rejected_prediction_tokens')),
+    ):
+        for name in names:
+            if name in details:
+                metrics[f'{prefix}_{name}'] = _count(details[name], name)
     return metrics
 
 
-def corrected_accounting(cases: Sequence[CaseUsage]) -> dict:
-    """Sum every known metric, using the same distinct-case denominator.
-
-    Exact repeated observations are idempotent. Conflicting identities fail
-    explicitly rather than silently choosing a value. Success is not an input.
-    """
+def _validated_observations(cases, *, full_evidence=False):
+    """Validate and index evidence without calculating either accounting policy."""
     if len({case.case_id for case in cases}) != len(cases):
         raise ValueError("provide one CaseUsage per case, containing all attempts")
     names = list(METRICS)
-    unique = {}
+    by_case = {}
     for case in cases:
+        unique = by_case[case.case_id] = {}
         if case.llm_called is not None and type(case.llm_called) is not bool:
             raise ValueError("llm_called must be True, False or None")
         if case.observations and case.llm_called is not True:
@@ -166,7 +170,17 @@ def corrected_accounting(cases: Sequence[CaseUsage]) -> dict:
                              or (previous.purpose, previous.model, previous.parent_call_id, previous.operation_id)
                              != (item.purpose, item.model, item.parent_call_id, item.operation_id)):
                 raise ValueError(f"conflicting usage identity: {identity}")
+            if full_evidence and previous and {
+                    k: v for k, v in asdict(previous).items() if k != 'source'} != {
+                    k: v for k, v in asdict(item).items() if k != 'source'}:
+                raise ValueError('Conflicting response evidence')
             unique.setdefault(identity, item)
+    return names, by_case
+
+
+def corrected_accounting(cases: Sequence[CaseUsage]) -> dict:
+    """Sum known metrics with the original v1 called-case denominator."""
+    names, by_case = _validated_observations(cases)
     denominator = sum(case.llm_called is True for case in cases)
     unknown_cases = [case.case_id for case in cases if case.llm_called is None]
     metrics = {}
@@ -174,7 +188,7 @@ def corrected_accounting(cases: Sequence[CaseUsage]) -> dict:
         values = []
         reasons = []
         for case in cases:
-            observations = [item for item in unique.values() if item.case_id == case.case_id]
+            observations = by_case[case.case_id]
             if case.llm_called is None:
                 reasons.append(f"{case.case_id}: LLM call status unknown")
             if case.llm_called is True and not observations:
@@ -182,7 +196,7 @@ def corrected_accounting(cases: Sequence[CaseUsage]) -> dict:
             if not case.coverage_complete:
                 reasons.append(f"{case.case_id}: incomplete trace coverage")
             reasons.extend(f"{case.case_id}: {reason}" for reason in case.issues)
-            for item in observations:
+            for item in observations.values():
                 value = item.metrics.get(name)
                 if value is None:
                     reasons.append(f"{item.source}: {name} unknown")
@@ -202,15 +216,6 @@ def corrected_accounting(cases: Sequence[CaseUsage]) -> dict:
         "cases_selected": len(cases), "unknown_call_cases": unknown_cases,
         "metrics": metrics,
     }
-
-
-def comparison_report(method: OriginalAccounting, original_cases: Sequence[OriginalCase],
-                      cases: Sequence[CaseUsage]) -> dict:
-    """JSON-ready two-policy report; neither policy overwrites AgentResult."""
-    if not callable(getattr(method, "original_accounting", None)):
-        raise ValueError("method must implement original_accounting")
-    return {"original_token_accounting": method.original_accounting(original_cases),
-            "corrected_token_accounting": corrected_accounting(cases)}
 
 
 def render_accounting(report: Mapping[str, Any]) -> str:
@@ -244,4 +249,6 @@ def render_accounting(report: Mapping[str, Any]) -> str:
     if "overhead" in report:
         from .overhead import render_overhead
         lines.append(render_overhead(report["overhead"]))
+    from .pricing import render_cost
+    lines.append(render_cost(report.get('cost_accounting')))
     return "\n".join(lines)

@@ -40,13 +40,14 @@ def build(output, name, dockerfile, *, includes=(), context=ROOT):
 
 
 def tools_image(agent):
-    if agent in ('mini', 'trae', 'verifier'):
+    if agent in ('mini', 'trae', 'verifier', 'verified_verifier'):
         source = {'mini': 'agents/mini_swe_agent/upstream', 'trae': 'agents/trae/upstream',
-                  'verifier': 'datasets/deepswe/upstream/pier'}[agent]
+                  'verifier': 'datasets/deepswe/upstream/pier',
+                  'verified_verifier': 'datasets/swe_bench_verified/upstream/swebench'}[agent]
         return PYTHON + f'''COPY {source}/ /build/source/
 RUN /opt/tokenana/bin/python -m pip install /build/source && /opt/tokenana/bin/python -m pip freeze > /opt/tokenana/installed-packages.txt
 RUN ln -s bin/python /opt/tokenana/python && mkdir -p /opt/tokenana/empty
-''' + (f'RUN ln -s bin/{"mini" if agent == "mini" else "trae-cli"} /opt/tokenana/{"mini" if agent == "mini" else "trae-cli"}\n' if agent != 'verifier' else ''), [source]
+''' + (f'RUN ln -s bin/{"mini" if agent == "mini" else "trae-cli"} /opt/tokenana/{"mini" if agent == "mini" else "trae-cli"}\n' if agent in ('mini', 'trae') else ''), [source]
     if agent == 'codex':
         return '''FROM rust:slim-bookworm AS builder
 RUN apt-get update && apt-get install -y pkg-config libssl-dev build-essential cmake clang libclang-dev protobuf-compiler git
@@ -75,19 +76,20 @@ RUN mkdir -p /opt/tokenana/opencode-config/opencode && touch /opt/tokenana/openc
 
 def prepare_images(output, rows, settings, *, jobs):
     from datasets.deepswe.tasks import select_tasks
+    selected = {agent: sorted({r['case'] for r in rows if r['agent'] == agent})
+                for agent in sorted({r['agent'] for r in rows})}
+    datasets = {r['case']: r.get('dataset', 'deepswe') for r in rows}
+    selected['verifier'] = sorted(case for case, dataset in datasets.items() if dataset == 'deepswe')
     info = json.loads(subprocess.check_output(['docker', 'info', '--format', '{{json .}}'], timeout=30))
     write_json(output / 'docker-environment.json', {key: info.get(key) for key in
         ('OSType', 'Architecture', 'Driver', 'DriverStatus', 'NCPU', 'MemTotal', 'ServerVersion')})
-    required_memory = jobs * (8192 + 512) * 1024 * 1024
-    if info.get('MemTotal', 0) < required_memory:
-        raise ValueError(f'Docker needs at least {jobs * 8.5:g} GiB for --jobs {jobs}; increase Docker Desktop memory or reduce --jobs. Task memory limits are unchanged.')
-    if info.get('NCPU', 0) < jobs * 2:
-        raise ValueError('Docker needs at least 2 CPUs per worker; reduce --jobs')
     if (output / 'images.json').exists():
         saved = json.loads((output / 'images.json').read_text())
-        identities = [saved['controller']] + [image for key, values in saved.items()
-                     if key != 'controller' for image in values.values()]
-        for image in identities:
+        identities = [saved['controller']] + [saved[agent][case]
+                     for agent, cases in selected.items() for case in cases]
+        if 'verified' in datasets.values():
+            identities.append(saved['verified_verifier'])
+        for image in dict.fromkeys(identities):
             subprocess.run(['docker', 'image', 'inspect', image], check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         return saved
@@ -95,27 +97,30 @@ def prepare_images(output, rows, settings, *, jobs):
     controller = 'tokenana/controller:' + REVISION
     build(output, controller, '''FROM docker:27-cli AS dockercli
 ''' + PYTHON + '''COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
-RUN python -m pip install tiktoken jinja2 httpx requests && python -m pip freeze > /opt/tokenana/installed-packages.txt
+RUN python -m pip install tiktoken jinja2 httpx requests openai && python -m pip freeze > /opt/tokenana/installed-packages.txt
 RUN python -c "import tiktoken; tiktoken.encoding_for_model('gpt-4o')"
 ENTRYPOINT []
 ''')
     result = {'controller': controller, **{a: {} for a in (*agents, 'verifier')}}
-    cases = sorted({r['case'] for r in rows})
+    cases = selected['verifier']
     records = {r.task.instance_id: r for r in select_tasks(task_ids=cases)}
     for agent in (*agents, 'verifier'):
+        if not selected[agent]:
+            continue
         custom = settings.get('images', {}).get(agent)
         if not custom:
             tools = f'tokenana/{agent}-tools:{REVISION}'
             dockerfile, includes = tools_image(agent)
             build(output, tools, dockerfile, includes=includes)
-        for case in cases:
+        for case in selected[agent]:
             if custom:
-                image = custom.format(task_id=case)
+                image = custom.format(task_id=case, dataset=datasets[case])
                 if subprocess.run(['docker', 'image', 'inspect', image], stdout=subprocess.DEVNULL,
                                   stderr=subprocess.DEVNULL).returncode:
                     subprocess.run(['docker', 'pull', '--platform', 'linux/amd64', image], check=True)
             else:
-                base = records[case].config['environment'].get('docker_image')
+                base = (records[case].config['environment'].get('docker_image') if datasets[case] == 'deepswe'
+                        else 'swebench/sweb.eval.x86_64.' + case.lower().replace('__', '_1776_') + ':latest')
                 if not base:
                     raise ValueError(f'{case}: task has no published docker_image')
                 image = f'tokenana/{case}-{agent}:{REVISION}'
@@ -130,13 +135,21 @@ ENTRYPOINT []
                 else:
                     includes = []
                     dockerfile += 'RUN test ! -e /tests && test ! -e /solution\n'
-                dockerfile += 'WORKDIR /app\nENTRYPOINT []\n'
+                dockerfile += f"WORKDIR {'/app' if datasets[case] == 'deepswe' else '/testbed'}\nENTRYPOINT []\n"
                 build(output, image, dockerfile, includes=includes)
             result[agent][case] = image
+    if 'verified' in datasets.values():
+        image = settings.get('images', {}).get('verified_verifier')
+        if not image:
+            image = 'tokenana/verified-verifier:' + REVISION
+            dockerfile, includes = tools_image('verified_verifier')
+            build(output, image, 'FROM docker:27-cli AS dockercli\n' + dockerfile +
+                  'COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker\n', includes=includes)
+        result['verified_verifier'] = image
     def identity(image):
         return subprocess.check_output(['docker', 'image', 'inspect', '--format', '{{.Id}}', image],
                                        text=True, timeout=30).strip()
-    result = {key: identity(value) if key == 'controller' else
+    result = {key: identity(value) if isinstance(value, str) else
               {case: identity(image) for case, image in value.items()} for key, value in result.items()}
     write_json(output / 'images.json', result)
     return result

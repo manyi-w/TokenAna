@@ -11,6 +11,16 @@ API_PATHS = {
 
 
 def normalize_usage(raw, protocol, provider=None):
+    # Qwen's OpenAI-compatible cache creation counter is an input subcategory.
+    # Never treat a missing counter as a server-reported zero.
+    if provider == 'dashscope' and protocol in ('responses', 'chat_completions'):
+        key = 'input_tokens_details' if protocol == 'responses' else 'prompt_tokens_details'
+        details = raw.get(key) or {}
+        if isinstance(details, dict) and 'cache_creation_input_tokens' in details:
+            write = _count(details['cache_creation_input_tokens'], 'cache_creation_input_tokens')
+            if details.get('cache_write_tokens') not in (None, write):
+                raise ValueError('Qwen cache write counters disagree')
+            raw = {**raw, key: {**details, 'cache_write_tokens': write}}
     if protocol == "responses":
         return normalize_openai_usage(raw)
     if protocol == "chat_completions":
@@ -30,16 +40,8 @@ def normalize_usage(raw, protocol, provider=None):
             "input_tokens_details": details,
             "output_tokens_details": raw.get("completion_tokens_details"),
         })
-        for source, prefix, names in (
-            (details, "input", ("audio_tokens",)),
-            (raw.get("completion_tokens_details") or {}, "output",
-             ("audio_tokens", "accepted_prediction_tokens", "rejected_prediction_tokens")),
-        ):
-            if not isinstance(source, dict):
-                raise ValueError("completion_tokens_details must be an object")
-            for name in names:
-                if name in source:
-                    metrics[f"{prefix}_{name}"] = _count(source[name], name)
+        if not isinstance(raw.get("completion_tokens_details") or {}, dict):
+            raise ValueError("completion_tokens_details must be an object")
         if provider == "deepseek" and "prompt_cache_miss_tokens" in raw:
             miss = _count(raw["prompt_cache_miss_tokens"], "prompt_cache_miss_tokens")
             metrics["cache_miss"] = miss

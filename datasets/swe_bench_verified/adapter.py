@@ -7,6 +7,7 @@ from src.interfaces import AgentResult, PatchResult, Task, Workspace
 
 
 class SweBenchVerified:
+    supports_model_channel = True
     def __init__(self, data_path: Path | None = None):
         self.data_path = (data_path if data_path is not None else
                           Path(__file__).parent / "data/swe_bench_verified.json")
@@ -16,19 +17,28 @@ class SweBenchVerified:
             "data_path": str(self.data_path.resolve()),
             "required": ["Prepared task containers at each selected base commit",
                          "Activated task environment and separate artifact mount",
-                         "sb-cli and SWEBENCH_API_KEY for later authorized submission"],
-            "submission_template": ["sb-cli", "submit", "swe-bench_verified", "test",
+                         "Prepared verifier image containing the local official SWE-bench harness"],
+            "submission_template": ["python", "-m", "swebench.harness.run_evaluation",
                                     "--predictions_path", "<predictions.json>", "--run_id", "<run-id>"],
-            "report_template": ["sb-cli", "get-report", "swe-bench_verified", "test", "<run-id>"],
+            "report_template": ["<local-official-harness-report.json>"],
             "environment_checked": False,
         }
 
-    def tasks(self, *, limit: int | None = None) -> list[Task]:
-        """Keep file order; None selects all records, zero selects none."""
+    def tasks(self, *, limit: int | None = None, task_ids: list[str] | None = None) -> list[Task]:
+        """Keep file order or explicit ID order; apply limit after selection."""
         if limit is not None and (type(limit) is not int or limit < 0):
             raise ValueError("limit must be a non-negative integer or None")
         with self.data_path.open(encoding="utf-8") as stream:
             records = json.load(stream)
+        if task_ids is not None:
+            if (not isinstance(task_ids, list) or any(not isinstance(i, str) or not i for i in task_ids)
+                    or len(task_ids) != len(set(task_ids))):
+                raise ValueError("task_ids must be a list of unique nonempty strings")
+            indexed = {record["instance_id"]: record for record in records}
+            missing = set(task_ids) - indexed.keys()
+            if missing:
+                raise ValueError("unknown Verified task IDs: " + ", ".join(sorted(missing)))
+            records = [indexed[case] for case in task_ids]
         return [Task(
             instance_id=record["instance_id"],
             repo=record["repo"],
@@ -40,7 +50,17 @@ class SweBenchVerified:
                            run_id: str | None = None):
         from .evaluation import prepare_submission
 
-        return prepare_submission(results, directory, agent=agent, mode=mode, run_id=run_id)
+        plan = prepare_submission(results, directory, agent=agent, mode=mode, run_id=run_id)
+        plan.kind = 'local'
+        return plan
+
+    def plan_evaluation(self, run, submission):
+        from .local_evaluation import plan
+        return plan(run, submission)
+
+    def evaluate_local(self, run, submission, directory, previous_report=None):
+        from .local_evaluation import evaluate_local
+        return evaluate_local(run, submission, directory, previous_report)
 
     def read_report(self, path: Path):
         from .evaluation import read_report

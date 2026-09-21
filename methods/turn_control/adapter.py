@@ -17,12 +17,19 @@ class TurnControl:
     original_trace_formats = ("agent-final-summary-v1",)
 
     def validate_options(self, options):
+        if set(options) == {'frozen_budget'}:
+            budget = options['frozen_budget']
+            if not isinstance(budget, dict) or budget.get('algorithm') != 'linear-percentile-ceil' or not budget.get('baseline_id'):
+                raise ValueError('frozen budget requires baseline identity and original percentile algorithm')
+            TurnBudget(budget.get('initial'), budget.get('final'))
+            return
         if set(options) != {"budget_profile"} or options["budget_profile"] not in BUDGETS:
             raise ValueError("turn_control requires a known budget_profile: " + ', '.join(BUDGETS))
 
     def run(self, task, agent, workspace, options):
         self.validate_options(options)
-        budget = TurnBudget(*BUDGETS[options["budget_profile"]])
+        frozen = options.get('frozen_budget')
+        budget = TurnBudget(frozen['initial'], frozen['final']) if frozen else TurnBudget(*BUDGETS[options["budget_profile"]])
         return MethodResult(calls=[agent.run_controlled(task.problem_statement, workspace, budget)])
 
     def original_accounting(self, cases):

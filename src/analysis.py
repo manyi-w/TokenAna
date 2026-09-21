@@ -1,6 +1,5 @@
 """Offline accounting exports and comparisons; no agent or evaluator execution."""
 
-import csv
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -10,6 +9,7 @@ from .components import Component
 from .interfaces import Task
 from .loading import load_adapter
 from .records import write_json
+from .tabular import cell as _cell, write_text as _text, legacy_csv as _csv, markdown as _markdown
 from .overhead import overhead_rows
 
 
@@ -18,37 +18,6 @@ POLICIES = ("original", "corrected")
 
 def _read(path):
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _cell(value):
-    if value is None:
-        return "null"
-    if isinstance(value, (dict, list, bool)):
-        return json.dumps(value, ensure_ascii=False)
-    return str(value)
-
-
-def _text(path, text):
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(text, encoding="utf-8")
-    temporary.replace(path)
-
-
-def _csv(path, rows, fields):
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    with temporary.open("w", encoding="utf-8", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows({key: _cell(row.get(key)) for key in fields} for row in rows)
-    temporary.replace(path)
-
-
-def _markdown(rows, fields):
-    def line(values):
-        return "| " + " | ".join(_cell(v).replace("|", "\\|").replace("\n", "<br>")
-                                  for v in values) + " |"
-    return "\n".join([line(fields), line(["---"] * len(fields)),
-                       *(line([row.get(key) for key in fields]) for row in rows)])
 
 
 def _policy(report, policy):
@@ -90,6 +59,9 @@ def export_accounting(report, output):
              for case in report["cases"] for row in _dual_rows(case)]
     fields = list(summary[0])
     write_json(output / "accounting.json", report)
+    if 'corrected_v2_api' in report:
+        from .research_exports import export_v2
+        export_v2(report, output)
     _text(output / "accounting.txt", render_accounting(report) + "\n")
     _csv(output / "accounting.csv", summary, fields)
     _csv(output / "cases.csv", cases, ["case_id", "repo", "base_commit", "stage", "resolved", "control", "prompt_metadata", "native_final_summary", *fields])
@@ -102,6 +74,8 @@ def export_accounting(report, output):
     evaluation = report.get("evaluation") or {}
     evaluation_fields = ["selected", "known_outcomes", "resolved", "resolved_over_selected", "resolved_over_completed", "complete"]
     _csv(output / "evaluation.csv", [evaluation], evaluation_fields)
+    from .cost_reporting import export_cost, cost_markdown
+    export_cost(report.get('cost_accounting'), output, _identity(report))
     _text(output / "accounting.md", "# Token accounting\n\n"
           + "Generation status: " + report["run_status"] + ".\n\n"
           + _markdown([_identity(report)], ["dataset", "method", "agent", "model"]) + "\n\n"
@@ -113,10 +87,12 @@ def export_accounting(report, output):
           + "\n\n" + _markdown(overhead, overhead_fields)
           + "\n\n## Evaluation\n\nMissing outcomes remain unknown; ratios use the stated denominators.\n\n"
           + _markdown([evaluation], evaluation_fields)
+          + '\n\n## Cost (USD)\n\n' + cost_markdown(report.get('cost_accounting'))
+          + '\n\n[Requests](requests.csv) · [Cost components](costs.csv)\n'
           + "\n\n[Case metrics](cases.csv) · [Raw usage references and configuration](accounting.json)\n")
 
 
-def analyze_run(run, output=None):
+def analyze_run(run, output=None, *, pricing=None):
     """Recompute using saved configuration/tasks, never the experiment TOML or dataset."""
     from .run_accounting import build_accounting
 
@@ -133,7 +109,8 @@ def analyze_run(run, output=None):
         raise ValueError("duplicate saved task IDs")
     components = [load_adapter(Component(**{**snapshot[kind], "path": Path(snapshot[kind]["path"])}))
                   for kind in ("method", "agent")]
-    report = build_accounting(run, state, tasks, *components)
+    from .pricing import saved_pricing
+    report = build_accounting(run, state, tasks, *components, pricing=saved_pricing(run, pricing))
     report["experiment"] = snapshot
     if state.get("status") == "running":
         # Includes a process killed before it could persist an interrupted state.
@@ -151,6 +128,7 @@ def analyze_run(run, output=None):
                           "note": "Recomputed from saved artifacts using the currently installed adapters."}
     target = (Path(output) if output is not None else
               run / "analysis" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")).resolve()
+    report['analysis']['output'] = str(target)
     target.mkdir(parents=True, exist_ok=False)
     export_accounting(report, target)
     return {"output": str(target), "report": report}
@@ -201,6 +179,8 @@ def compare_runs(paths, output):
     case_maps = [_case_map(report) for report in reports]
     summary, cases, inputs = [], [], []
     baseline = reports[0]
+    from .cost_reporting import compare_costs
+    costs = compare_costs(reports, case_maps)
     for index, (report, source) in enumerate(loaded):
         experiment = report["experiment"]
         inputs.append({"index": index, "source": source, "run": report["run"],
@@ -256,6 +236,7 @@ def compare_runs(paths, output):
                       for index, report in enumerate(reports) for case in report["cases"]
                       for row in overhead_rows(case.get("overhead"))]
     result = {"schema_version": 1, "baseline_index": 0, "inputs": inputs,
+              'cost_comparison': costs,
               "overhead": overhead, "overhead_cases": overhead_cases,
               "summary": summary, "cases": cases,
               "note": "Changes compare the same policy against run 0. No evaluation success is inferred."}
@@ -263,6 +244,7 @@ def compare_runs(paths, output):
     target.mkdir(parents=True, exist_ok=False)
     write_json(target / "comparison.json", result)
     _csv(target / "summary.csv", summary, list(summary[0]))
+    _csv(target / 'costs.csv', costs, list(costs[0]))
     _csv(target / "overhead.csv", overhead, list(overhead[0]))
     _csv(target / "overhead-cases.csv", overhead_cases, ["run_index", "case_id", *list(overhead_rows(None)[0])])
     overhead_text = _markdown(overhead, list(overhead[0]))
@@ -281,6 +263,7 @@ def compare_runs(paths, output):
           + "\n\n" + _markdown(summary, list(summary[0]))
           + "\n\n## Overhead\n\nOverlapping groups are not additive to total consumption. Values use each run's stated denominator; no cross-rule savings inferred.\n\n" + overhead_text
           + "\n\n## Evaluation\n\n" + _markdown(evaluation_rows, list(evaluation_rows[0]))
+          + '\n\n## Cost (USD)\n\n' + _markdown(costs, list(costs[0]))
           + "\n\n[All aligned cases](cases.csv) · [Full comparison and configuration](comparison.json)\n")
     return {"output": str(target), "runs": len(reports), "baseline": loaded[0][1],
             "overhead_text": overhead_text}

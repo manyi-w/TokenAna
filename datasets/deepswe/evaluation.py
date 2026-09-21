@@ -10,7 +10,7 @@ from src.interfaces import ArtifactDirectory
 from src.records import write_json
 from src.workspaces import DockerWorkspace
 from .tasks import read_task
-from .workspace import check_repository, container, resource_options
+from src.containers import check_repository, container, resource_options
 
 
 def _read(path):
@@ -80,8 +80,10 @@ def _case_evaluation(case, item, source, runtime, directory):
               (component / "verifier_worker.py", "/tokenana/verifier_worker.py", True)]
     outcome = {"status": "error", "resolved": None, "directory": str(directory), "rewards": None}
     try:
+        from src.retention import retention_mode
         with container(runtime["verifier_images"][case], directory, config["verifier"]["environment"], mounts,
                        retention=runtime.get('retain_files', False),
+                       retention_mode=retention_mode(runtime),
                        relaxed_storage=runtime.get('relaxed_storage', False),
                        environment={**config["environment"].get("env", {}),
                                     **config["verifier"]["environment"].get("env", {})}) as name:

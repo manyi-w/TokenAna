@@ -24,6 +24,7 @@ def create_app(*, checkpoint, tokenizer_path, backend_base_url, hidden_size, dev
     import requests
     import torch
     from fastapi import FastAPI
+    from fastapi.responses import JSONResponse
     from pydantic import BaseModel
     from transformers import AutoTokenizer
     from importlib import import_module
@@ -69,7 +70,9 @@ def create_app(*, checkpoint, tokenizer_path, backend_base_url, hidden_size, dev
                 if url != backend_base_url.rstrip('/') + '/generate':
                     raise ValueError('unexpected hidden-state destination')
                 start = time.monotonic()
-                record = {'complete': False}
+                record = {'complete': False, 'started_at': time.time(), 'submitted_input_tokens': len(kwargs.get('json', {}).get('input_ids', [])),
+                          'input_tokens': None, 'forward_count': None, 'tokenizer': tokenizer_path, 'model': MODEL,
+                          'note': 'Backend request input; internal forward count requires backend telemetry'}
                 records.append(record)
                 try:
                     response = requests.post(url, **kwargs)
@@ -77,6 +80,12 @@ def create_app(*, checkpoint, tokenizer_path, backend_base_url, hidden_size, dev
                     response.raise_for_status()
                     data = response.json()
                     meta = data.get('meta_info', {})
+                    telemetry = meta.get('tokenana_local_compute')
+                    if isinstance(telemetry, dict):
+                        from src.local_compute import validate_backend_telemetry
+                        record['local_compute'] = validate_backend_telemetry(telemetry, model=MODEL)
+                        record.update(input_tokens=record['local_compute']['input_tokens'],
+                                      forward_count=record['local_compute']['forward_count'])
                     # Keep raw counters, exclude large hidden-state tensors from accounting.
                     record['meta_info'] = {key: value for key, value in meta.items() if key != 'hidden_states'}
                     prompt, completion = meta.get('prompt_tokens'), meta.get('completion_tokens')
@@ -93,6 +102,7 @@ def create_app(*, checkpoint, tokenizer_path, backend_base_url, hidden_size, dev
                     raise
                 finally:
                     record['duration_sec'] = time.monotonic() - start
+                    record['finished_at'] = time.time()
 
         namespace = declarations(SOURCE, names, {'BaseModel': BaseModel, 'np': np, 'pybase64': pybase64,
             'torch': torch, '_json': json, 'time': time, 'defaultdict': defaultdict,
@@ -105,6 +115,15 @@ def create_app(*, checkpoint, tokenizer_path, backend_base_url, hidden_size, dev
         from typing import List, Optional
         for name in ('PruneRequest', 'PruneResponse'):
             namespace[name].model_rebuild(_types_namespace={'List': List, 'Optional': Optional})
-        result = namespace['_prune'](namespace['PruneRequest'](**payload)).model_dump()
-        return {**result, 'tokenana': descriptor, 'backend_requests': records}
+        from src.local_compute import observe_forwards, summary
+        with observe_forwards([head.compression_head], model='SWE-Pruner-Pro-head',
+                              tokenizer=tokenizer_path, input_kind='hidden_states') as forwards:
+            try:
+                result = namespace['_prune'](namespace['PruneRequest'](**payload)).model_dump()
+            except Exception as error:
+                return JSONResponse(status_code=500, content={'error_type': type(error).__name__,
+                    'tokenana': descriptor, 'backend_requests': records,
+                    'head_compute': summary(forwards, complete=False)})
+        return {**result, 'tokenana': descriptor, 'backend_requests': records,
+                'head_compute': summary(forwards, complete=True)}
     return app
