@@ -45,12 +45,7 @@ python -B -m tokenAna study experiments/paper.toml --runs runs/paper-run --outpu
 - 研究报告包含逐请求、逐任务、口径桥接、方法排名、节省率、配对仓库 bootstrap、Pareto、四组结果诊断及证据索引。无法隔离的统计变化保持未知。
 - 默认 research 留存保存最终工作区增量及共享基础镜像身份；full 模式增加逐请求文件系统快照。二者均保留模型请求/响应、原生轨迹、方法前后快照和评测记录。时间对比须统一留存模式。
 
-## 验证与文档
-
-```bash
-python -B scripts/validate_study.py --jobs 4 --output runs/study-validation
-python -B scripts/validate_retention.py --jobs 4
-```
+## 文档与当前状态
 
 [使用说明](docs/usage.md) · [统计协议](docs/accounting-protocol.md) · [架构](docs/architecture.md) · [开发流程与当前验收](docs/development-workflow.md) · [协作规则](AGENTS.md)
 

@@ -53,13 +53,8 @@ python -B -m tokenAna study experiments/paper.toml --runs runs/paper-run --outpu
 
 请求/响应、原生轨迹、方法前后快照、模型配置、价格、补丁和评测记录均保留。归档验证失败时容器保留；查看 retention.json、controller.json、channel-volumes.jsonl，不擅自清理尚未确认完整的证据。
 
-## 验证
+## 运行前检查
 
-```bash
-python -B scripts/validate_study.py --jobs 4 --output runs/study-validation
-python -B scripts/validate_retention.py --jobs 4
-```
-
-第一条为独立临时目录中的离线单元与合成重建测试，第二条为留存边界验证。scripts/validate_mini_component.py 在准备好的 mini 任务镜像运行，使用容器内回环假模型和临时仓库；它验证实际 CLI，不衡量解题效果、不等于官方数据集端到端验收。
+使用前文的 study 展开和 --dry-run 检查固定矩阵与配置；这些入口不调用模型，也不表示真实组件验收完成。开发期测试、专用验证脚本及模拟产物在确认通过后已清理。
 
 尚缺的真实验收按开发流程表补齐：四 agent、两数据集、五语言、六方法，包含失败重试、缓存、辅助调用、GPU forward、流式去重、中断与评测恢复。跳过、缺环境与未执行分别记录。正式运行不会由离线验证自动启动。
