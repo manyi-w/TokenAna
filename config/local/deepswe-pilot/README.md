@@ -1,17 +1,17 @@
-# DeepSWE 单条先期实验：本机填写位置
+# DeepSWE 正式入口的本地配置
 
-**当前入口已接线（2026-09-20）：** `bash scripts/run-deepswe-pilot.sh`，先用 `--dry-run` 检查。默认四方法、52组合，AttnCompress/SWE-Pruner Pro不跑。筛选、镜像准备、留存计时和恢复说明见 [运行说明](../../../docs/deepswe-pilot-cli.md)。下面“未接入/65组合”等为初始预检历史，已被当前入口替代。配置与密钥文件请保持0600；不要把文件内容贴到日志或对话。
+`bash scripts/run-experiments.sh` 读取此目录的 `settings.toml` 和可选的 `secrets.env`。两文件被本目录 `.gitignore` 排除；公开模板在 [config/examples](../../examples/)，初始化命令见 [根 README](../../../README.md)。已有配置请直接编辑，不要覆盖。
 
-先填写同目录 `settings.toml` 和 `secrets.env`。这两份本地文件被 `.gitignore` 忽略，密钥文件权限设置为仅当前用户可读写。
+- 主模型的 `name` 必须匹配入口内置实验标识；`model_id` 填服务实际接受的 ID。只校验本次所选模型。
+- `provider`、`protocol` 必须匹配 agent 支持；不静默翻译协议。模板使用 OpenAI Responses、Anthropic Messages、DeepSeek/DashScope Chat Completions。
+- `base_url` 填 API 基址；不要附带认证信息或生成路由。`api_key_env` 只填环境变量名，值放 secrets.env 或进程环境。同名进程变量优先。
+- AgentDiet 需额外填写 `agent_diet_auxiliary`，模型固定为 `gpt-5-mini`，辅助基址后追加 `/chat/completions`。
+- OpenCode 的上下文/输出上限应与实验约定一致；0/缺省时入口用 131072/8192 并提示，这是实验上限，不是服务商能力声明。
+- `images` 空值触发按选定组合准备镜像；自备镜像可用 `{task_id}` 占位。`runtime_paths` 是容器内路径，不是宿主路径。
 
-- `settings.toml`：四个主模型端点/模型 ID、OpenCode 上下文与输出上限、AgentDiet 辅助服务、AttnCompress CUDA 服务、镜像及容器内路径。空字符串或 0 表示缺项，已有值仍需按实际账户核对。
-- `secrets.env`：密钥值。主模型和 AgentDiet 可以使用同一账户，但辅助通道需显式配置。无认证的压缩服务可以留对应密钥为空。
-- DeepSeek/Qwen 的 turn_control 预算映射尚未确定，不能默认宣称 GPT 分位数适用于这些模型。
+```bash
+chmod 600 config/local/deepswe-pilot/settings.toml config/local/deepswe-pilot/secrets.env
+bash scripts/run-experiments.sh --method run_free --agent mini --model deepseek-v4.1-flash --dry-run
+```
 
-这些文件目前是配置收集表，**尚未接入运行命令，不是可执行实验配置**。不要直接将 settings.toml 传给 `tokenAna run`，也不要把密钥抄入 runtime TOML：现有运行器会原样保存 runtime.json，后续凭据注入必须避开该快照。
-
-已确认目标：同一条 DeepSWE 数据、run_free/turn_control/AgentDiet/AttnCompress/EET、四个 agent；Codex 仅 gpt-5.6-sol，其余 agent 各跑四模型，共 65 个组合。候选任务为按 ID 排序的首条 Python 任务 `adaptix-name-mapping-aliases`，尚未生成补丁或调用 API。先不扩至 20 条。
-
-运行前仍需补齐方法接入、Codex 会话能力、Qwen 协议兼容、DeepSWE 任务读取问题、Mac 容器运行架构、完整留存及计时。原压缩服务存在 CUDA 调用，不能保证全部服务只在 Mac 本机运行。Docker daemon 当前也无法连接，镜像尚未验证。
-
-预检详情见 `docs/deepswe-mac-pilot-readiness.md`（项目根目录下）；结构化检查记录保存在 `runs/preflight-deepswe-mac-20260920/`。填写服务配置不代表这些实现与运行条件已满足。
+这些设置专供矩阵入口使用，不能直接传给 `python -m tokenAna run`。不要提交凭据或把本地文件内容贴入日志。参数、恢复与默认 52 组合说明见 [运行手册](../../../docs/usage.md)。

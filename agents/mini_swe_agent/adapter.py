@@ -10,9 +10,10 @@ import time
 from typing import Any, Mapping
 
 from src.components import ConfigError
+from src.raw_usage import read_case_usage, read_case_usage_views
 from src.interfaces import AgentResult, Workspace
 from src.models import ModelConfig
-from src.patches import capture_patch
+from src.agent_artifacts import collect_agent_patch, check_session_outcome, save_patch_eligibility
 from src.workspaces import execution_timeout
 
 
@@ -25,6 +26,9 @@ _MODEL_PREFIX = {
 
 
 class MiniSweAgent:
+    read_case_usage = staticmethod(read_case_usage)
+    read_case_usage_views = staticmethod(read_case_usage_views)
+
     capabilities = ("turn_control",)
     session_capabilities = ("events", "replace_history", "state", "reminder", "terminate")
     session_version = "mini-session-compatible-v1"
@@ -58,11 +62,6 @@ class MiniSweAgent:
         expected = "litellm_response" if options["model_protocol"] == "responses" else "litellm"
         if options.get("model_class", "litellm") != expected:
             raise ValueError("mini model_class does not match the recording protocol")
-
-    def read_case_usage(self, directory, **identity):
-        from src.raw_usage import read_raw_usage
-
-        return read_raw_usage(directory / "api-records", **identity)
 
     def read_original_case(self, directory, case_id):
         from src.accounting import OriginalCase
@@ -296,20 +295,11 @@ class MiniSweAgent:
             errors.append(f"Non-zero exit code: {process.returncode}")
 
         if callback is not None:
-            try:
-                outcome = json.loads((artifacts.host / "session-outcome.json").read_text())
-                if not outcome.get("complete") or outcome.get("termination"):
-                    errors.append("Session callback failed, did not finish, or requested termination")
-            except (OSError, ValueError, AttributeError):
-                errors.append("Missing session outcome")
+            check_session_outcome(artifacts.host, errors,
+                incomplete="Session callback failed, did not finish, or requested termination",
+                missing="Missing session outcome", invalid_errors=(OSError, ValueError, AttributeError))
 
-        patch = ""
-        if process is not None:
-            try:
-                patch = capture_patch(workspace, artifacts, timeout=options.get("diff_timeout", 60))
-            except Exception as error:
-                errors.append(f"patch capture failed: {error}")
-        (artifacts.host / "patch.diff").write_text(patch, encoding="utf-8")
+        patch = collect_agent_patch(workspace, artifacts, process, options, errors)
 
         trajectory, trajectory_error = _read_trajectory(
             _original_trajectory(artifacts.host)
@@ -327,9 +317,7 @@ class MiniSweAgent:
         eligible, control = True, None
         if callback is not None:
             eligible = not errors and status == "Submitted" and bool(patch.strip())
-            (artifacts.host / "diagnostic.diff").write_text(patch, encoding="utf-8")
-            if not eligible:
-                (artifacts.host / "patch.diff").write_text("", encoding="utf-8")
+            save_patch_eligibility(artifacts.host, patch, eligible)
         if options.get("turn_control"):
             eligible = False
             try:
@@ -341,9 +329,8 @@ class MiniSweAgent:
             except (OSError, ValueError, TypeError, KeyError):
                 control = None
                 errors.append("Missing or invalid mini turn control outcome")
-            (artifacts.host / "diagnostic.diff").write_text(patch, encoding="utf-8")
+            save_patch_eligibility(artifacts.host, patch, eligible)
             if not eligible:
-                (artifacts.host / "patch.diff").write_text("", encoding="utf-8")
                 errors.append("Controlled generation has no eligible completed patch")
 
         return AgentResult(

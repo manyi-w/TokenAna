@@ -45,7 +45,7 @@ def _snapshots(config: ExperimentConfig, runtime: dict):
 
 def run_experiment(
     config: ExperimentConfig, runtime: dict, output: Path, *, resume: bool = False,
-    on_accounting=None,
+    on_accounting=None, pricing=None,
 ) -> dict:
     method = load_adapter(config.method)
     agent = BoundAgent(load_adapter(config.agent), config.agent.options, config.model,
@@ -70,6 +70,12 @@ def run_experiment(
         raise ValueError("agent runtime options are incomplete")
 
     output = output.resolve()
+    if runtime.get('retain_files') and 'retention_mode' not in runtime:
+        saved_runtime = _read_json(output / 'runtime.json') if resume else {}
+        if not resume or 'retention_mode' in saved_runtime:
+            runtime = {**runtime, 'retention_mode': 'research'}
+    from .retention import retention_mode
+    retention_mode(runtime)
     config_snapshot, runtime_snapshot = _snapshots(config, runtime)
     state_path = output / "state.json"
     if resume:
@@ -88,7 +94,10 @@ def run_experiment(
         state.pop("error", None)
         state["status"] = "running"
     else:
+        from .pricing import load_pricing, validate_pricing
+        price_snapshot = validate_pricing(pricing) if pricing is not None else load_pricing()
         output.mkdir(parents=True)
+        write_json(output / 'pricing.json', price_snapshot)
         write_json(output / "config.json", config_snapshot)
         write_json(output / "runtime.json", runtime_snapshot)
         write_json(output / "tasks.json", [asdict(task) for task in tasks])

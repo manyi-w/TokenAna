@@ -4,7 +4,7 @@
 
 新增 `session-chat.patch`，在 turn-control.patch 之后应用，独立 controlled 副本已包含改动，upstream 不变。涉及 11 个路径；具体 diff 在同目录 patch 中。新增 tokenana-session 非默认 feature、共享文件回调、原生历史回写、wire_api=chat_completions、直接 Chat HTTP/SSE 客户端及相关本地 schema。处理普通/custom/namespace 工具、流式与非流式响应、usage 和错误；不支持的服务端工具 schema 明确拒绝。Responses 路径保留。
 
-build.sh 现在顺序应用两个补丁，使用 codex-core/tokenana-turn-control,codex-core/tokenana-session features。运行会话构建还需显式 session_executable、session_version=codex-session-compatible-v1 和 record_raw_usage=true。完整交付见 [方法接入文档](../../../docs/method-integration-delivery.md)。
+build.sh 现在顺序应用两个补丁，使用 codex-core/tokenana-turn-control,codex-core/tokenana-session features。运行会话构建还需显式 session_executable、session_version=codex-session-compatible-v1 和 record_raw_usage=true。完整交付见 [方法接入文档](../../../docs/architecture.md)。
 
 补丁适用性仅用 patch --dry-run 检查；本轮未执行 Rust 格式化、编译、构建或 Rust 单测。Chat 客户端新增请求/工具/usage/失败单测源码，尚未运行。Python 消息映射、文件回调、原生摘要夹具及报告已离线测试，不能替代该 Rust 验证。下方未接通会话的描述是前一批历史状态。
 

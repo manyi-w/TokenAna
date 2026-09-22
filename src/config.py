@@ -24,6 +24,20 @@ def config_dict(config: ExperimentConfig) -> dict:
     return result
 
 
+def restore_experiment(snapshot: dict, path: Path, *, task_id: str) -> ExperimentConfig:
+    """Restore a frozen study profile without reapplying current launcher defaults."""
+    components = {}
+    for kind in ("method", "agent", "dataset"):
+        item = dict(snapshot[kind])
+        item["path"] = Path(item["path"])
+        item["options"] = dict(item["options"])
+        if kind == "dataset":
+            item["options"]["task_ids"] = [task_id]
+        components[kind] = Component(**item)
+    model = ModelConfig(**snapshot["model"]) if snapshot.get("model") else None
+    return ExperimentConfig(path=path, model=model, **components)
+
+
 def load_experiment(path: str | Path) -> ExperimentConfig:
     path = Path(path).resolve()
     document = read_toml(path)

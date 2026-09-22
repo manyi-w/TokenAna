@@ -7,7 +7,7 @@ class RunFreeMultilingual(RunFree):
     version = "run-free-multilingual-v1"
     task_languages = frozenset({"go", "typescript", "javascript", "rust"})
 
-    def build_prompt(self, task):
+    def build_prompt(self, task, *, allow_submission_git=False):
         return f"""You are a code repair expert.
 
 ## Repository Information
@@ -19,7 +19,8 @@ class RunFreeMultilingual(RunFree):
 
 ## EXECUTION MODE - ZERO EXECUTION
 Solve the task through static reading, reasoning and source editing.
-File reading, search, file operations and Git operations are allowed.
+File reading, search and file operations are allowed.
+Git operations are allowed only to inspect changes and satisfy the task's required branch and commit submission.
 
 ## What You CANNOT Do
 - Execute tests, programs, examples, benchmarks or arbitrary project code in any language.

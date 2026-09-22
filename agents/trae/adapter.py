@@ -1,6 +1,6 @@
 """Launch the unchanged Trae CLI; keep accounting outside native execution."""
 
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack
 import json
 from pathlib import Path
 import re
@@ -10,9 +10,9 @@ import time
 
 from src.accounting import OriginalCase
 from src.components import ConfigError
+from src.raw_usage import read_case_usage, read_case_usage_views
 from src.interfaces import AgentResult
-from src.raw_usage import read_raw_usage
-from src.patches import capture_patch
+from src.agent_artifacts import collect_agent_patch, check_session_outcome, save_patch_eligibility
 from src.workspaces import execution_timeout
 
 
@@ -22,6 +22,9 @@ SUPPORTED_MODELS = {("openai", "responses"), ("openai", "chat_completions"), ("a
 
 
 class Trae:
+    read_case_usage = staticmethod(read_case_usage)
+    read_case_usage_views = staticmethod(read_case_usage_views)
+
     capabilities = ("turn_control",)
     session_capabilities = ("events", "replace_history", "state", "reminder", "terminate")
     session_version = "trae-session-compatible-v1"
@@ -60,9 +63,6 @@ class Trae:
             "environment_checked": False,
             "note": "Native prompts and step limit retained; direct protocol clients; no MCP servers configured",
         }
-
-    def read_case_usage(self, directory, **identity):
-        return read_raw_usage(directory / "api-records", **identity)
 
     def read_original_case(self, directory, case_id):
         from src.accounting import FinalSummary
@@ -200,13 +200,7 @@ class Trae:
             finally:
                 (host / "stdout.txt").write_text(stdout, encoding="utf-8")
                 (host / "stderr.txt").write_text(stderr, encoding="utf-8")
-        patch = ""
-        if process is not None:
-            try:
-                patch = capture_patch(workspace, artifacts, timeout=options.get("diff_timeout", 60))
-            except Exception as error:
-                errors.append(f"patch capture failed: {error}")
-        (host / "patch.diff").write_text(patch, encoding="utf-8")
+        patch = collect_agent_patch(workspace, artifacts, process, options, errors)
         tokens = count = 0
         try:
             trajectory = _trajectory(host / "trajectory.json")
@@ -224,21 +218,13 @@ class Trae:
                 eligible = not errors and control.get("termination_reason") == "completed" and bool(patch.strip())
             except (OSError, ValueError, AttributeError):
                 errors.append("Missing or invalid turn control outcome")
-            (host / "diagnostic.diff").write_text(patch, encoding="utf-8")
+            save_patch_eligibility(host, patch, eligible)
             if not eligible:
-                (host / "patch.diff").write_text("", encoding="utf-8")
                 errors.append("Controlled generation has no eligible completed patch")
         if callback is not None:
-            try:
-                outcome = json.loads((host / "session-outcome.json").read_text())
-                if not outcome.get("complete") or outcome.get("termination"):
-                    errors.append("Incomplete or terminated method session")
-            except (OSError, ValueError):
-                errors.append("Missing method session outcome")
+            check_session_outcome(host, errors)
             eligible = not errors and bool(patch.strip())
-            if not eligible:
-                (host / "diagnostic.diff").write_text(patch, encoding="utf-8")
-                (host / "patch.diff").write_text("", encoding="utf-8")
+            save_patch_eligibility(host, patch, eligible, diagnostic_always=False)
         return AgentResult(agent_type="trae", prompt=prompt,
                            output=trajectory.get("final_result") or stdout.strip(),
                            tokens_used=tokens, exec_count=count, duration_sec=time.monotonic() - started,

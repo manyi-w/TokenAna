@@ -11,8 +11,9 @@ from .records import write_json
 
 
 class ServiceHTTPError(RuntimeError):
-    def __init__(self, status):
+    def __init__(self, status, payload=None):
         self.status = status
+        self.payload = payload
         super().__init__(f'auxiliary service HTTP {status}')
 
 
@@ -35,7 +36,7 @@ def post_json(base_url, route, payload, *, artifacts, channel, protocol=None,
     (root / 'request.body').write_bytes(body)
     metadata = {'protocol': protocol, 'provider': 'openai' if protocol else None,
                 'model': model, 'attribution': {'purpose': 'method_auxiliary', **(identity or {})},
-                'response_complete': False, 'started_at': time.time()}
+                'response_complete': False, 'started_at': time.time(), 'forwarded_at': None}
     write_json(root / 'metadata.json', metadata)
     start = time.monotonic()
     connection = (HTTPSConnection if endpoint.scheme == 'https' else HTTPConnection)(
@@ -47,6 +48,8 @@ def post_json(base_url, route, payload, *, artifacts, channel, protocol=None,
             if not key:
                 raise ValueError(f'missing auxiliary credential environment variable: {api_key_env}')
             headers['Authorization'] = 'Bearer ' + key
+        metadata['forwarded_at'] = time.time()
+        write_json(root / 'metadata.json', metadata)
         connection.request('POST', endpoint.path.rstrip('/') + route, body, headers)
         response = connection.getresponse()
         metadata.update(status=response.status, response_headers=[(k, v) for k, v in response.getheaders()
@@ -57,7 +60,11 @@ def post_json(base_url, route, payload, *, artifacts, channel, protocol=None,
                 stream.flush()
         metadata['response_complete'] = True
         if not 200 <= response.status < 300:
-            raise ServiceHTTPError(response.status)
+            try:
+                error_payload = json.loads((root / 'response.body').read_bytes())
+            except ValueError:
+                error_payload = None
+            raise ServiceHTTPError(response.status, error_payload)
         return json.loads((root / 'response.body').read_bytes())
     except BaseException as error:
         metadata['error_type'] = type(error).__name__
@@ -65,4 +72,5 @@ def post_json(base_url, route, payload, *, artifacts, channel, protocol=None,
     finally:
         connection.close()
         metadata['duration_sec'] = time.monotonic() - start
+        metadata['finished_at'] = time.time()
         write_json(root / 'metadata.json', metadata)

@@ -9,7 +9,6 @@ import math
 import os
 from pathlib import Path
 import re
-from types import SimpleNamespace
 
 from src.interfaces import MethodResult
 from src.method_sessions import SessionMethod, save_state, tool_call, source_metrics
@@ -36,10 +35,12 @@ class EET(SessionMethod):
     version = 'eet-current-source-compatible-v1'
 
     def validate_options(self, options):
-        if set(options) - {'experience_library'}:
+        if set(options) - {'experience_library', 'retrieval_scope'}:
             raise ValueError('EET only accepts an existing experience_library; no generated experiences or new stopping rules')
         if options.get('experience_library') and not Path(options['experience_library']).is_file():
             raise ValueError('existing EET experience library required')
+        if options.get('retrieval_scope', 'repository') not in ('repository', 'cross_repository'):
+            raise ValueError('retrieval_scope must be repository or cross_repository')
         if importlib.util.find_spec('jinja2') is None:
             raise ValueError('EET mini-compatible prompt requires prepared jinja2')
 
@@ -87,6 +88,7 @@ class EET(SessionMethod):
         expert.experience_store = experience_store(library, TRAE / 'experience' if agent_kind == 'trae' else MINI / 'experience')
         expert.workflow_progress = dict(steps=0, has_code_changes=False, test_passed=False,
                                        last_confidence_check=None, confidence_score=None)
+        cross_repository = options.get('retrieval_scope') == 'cross_repository'
         if agent_kind == 'trae':
             found = expert.experience_store.search_by_issue_similarity(task.problem_statement, top_k=1, min_similarity=.15, use_tfidf=True)
             if not found:
@@ -95,14 +97,16 @@ class EET(SessionMethod):
             trae = declarations(TRAE / 'agent/trae_agent.py', ['TraeAgent'], {
                 'BaseAgent': object, 'override': lambda value: value, 'TRAE_AGENT_SYSTEM_PROMPT': ''})['TraeAgent']
             renderer = trae.__new__(trae)
-            repo = renderer._extract_repo_from_issue_id(task.instance_id)
+            repo = None if cross_repository else renderer._extract_repo_from_issue_id(task.instance_id)
             found = [(exp, score) for exp, score in found if not repo or renderer._extract_repo_from_issue_id(exp.issue_id) == repo][:1]
             experience_prompt = renderer.get_system_prompt(found)
         else:
-            found = expert.retrieve_experiences(task.problem_statement, task.instance_id)
+            found = expert.retrieve_experiences(task.problem_statement, None if cross_repository else task.instance_id)
             experience_prompt = expert.format_experiences(found)
         state = {'version': self.version, 'implementation': 'current-source-compatible; not full paper early stopping',
-                 'agent': agent_kind, 'retrieved': [exp.issue_id for exp, _ in found],
+                 'agent': agent_kind, 'retrieval_scope': options.get('retrieval_scope', 'repository'),
+                 'task_id': task.instance_id, 'experience_library': str(library),
+                 'retrieved': [exp.issue_id for exp, _ in found],
                  'experience_hit': bool(found), 'submission_prompts': 0, 'confidence_prompts': 0,
                  'historical_experience_generation_cost': None, 'workflow_progress': expert.workflow_progress}
         seen = set()

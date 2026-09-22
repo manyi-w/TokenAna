@@ -1,9 +1,8 @@
 """Portable DeepSWE matrix launcher. Host side uses only the standard library."""
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from dataclasses import replace
-from datetime import datetime, timezone
-import csv
 import fcntl
 import json
 import os
@@ -19,6 +18,9 @@ from uuid import uuid4
 
 from .records import write_json
 from .telemetry import span, totals
+from .pilot_reporting import summarize, run_directory, refresh, print_summary
+from .pricing import load_pricing, saved_pricing
+from .study import DATASETS, METHODS as SUPPORTED_METHODS, MODELS as SUPPORTED_MODELS, supported
 
 ROOT = Path(__file__).resolve().parents[1]
 METHODS = ('run_free', 'turn_control', 'agent_diet', 'eet')
@@ -26,22 +28,27 @@ AGENTS = ('codex', 'mini', 'trae', 'opencode')
 MODELS = ('gpt-5.6-sol', 'claude-opus-5', 'deepseek-v4.1-flash', 'qwen3.8-max')
 AGENT_DIR = {'mini': 'mini_swe_agent', **{a: a for a in AGENTS if a != 'mini'}}
 BUDGET = dict(zip(MODELS, ('deepswe_gpt', 'deepswe_claude', 'deepswe_deepseek', 'deepswe_qwen')))
-DEFAULT_CASE = 'adaptix-name-mapping-aliases'
 LOCAL = ROOT / 'config/local/deepswe-pilot'
 
 
 def parser():
-    p = argparse.ArgumentParser(description='Run DeepSWE locally, retaining all attempts and both token accounts.')
+    p = argparse.ArgumentParser(description='Run fixed experiments, retaining all attempts and token accounts.')
+    p.add_argument('--study', type=Path, help='Fixed study TOML; bypass per-arm next-N and cross-run skipping')
+    p.add_argument('--dataset', choices=tuple(DATASETS), help='Dataset for an ad-hoc run (default: deepswe)')
     for flag in ('method', 'model', 'agent'):
         p.add_argument('--' + flag, help='Comma-separated selection')
     cases = p.add_mutually_exclusive_group()
     cases.add_argument('--case', help='Comma-separated task IDs')
-    cases.add_argument('--cases', type=int, help='First N tasks from the fixed Python task list')
+    cases.add_argument('--count', '--cases', dest='cases', type=int,
+                       help='Next N unrecorded tasks per model/agent/method (default: 1)')
     p.add_argument('--jobs', type=int, default=1)
     output = p.add_mutually_exclusive_group()
     output.add_argument('--output', type=Path)
     output.add_argument('--resume', type=Path)
+    output.add_argument('--summarize', type=Path, help='Refresh saved reports offline; no generation or evaluation')
+    p.add_argument('--pricing', type=Path, help='Price TOML for a new run or explicit offline repricing')
     p.add_argument('--dry-run', action='store_true')
+    p.add_argument('--rerun', action='store_true', help='Run selected combinations again despite saved pilot history')
     p.add_argument('--_worker', type=Path, help=argparse.SUPPRESS)
     return p
 
@@ -58,19 +65,19 @@ def matrix(methods, agents, models, cases):
     for method in methods:
         for agent in agents:
             for model in models:
-                if agent == 'codex' and model != MODELS[0]:
-                    skipped.append(f'{method}/{agent}/{model}: Codex only supports the selected GPT model')
+                if not supported(method, agent, model):
+                    skipped.append(f'{method}/{agent}/{model}: outside the supported method/agent/model matrix')
                     continue
                 for case in cases:
                     rows.append(dict(method=method, agent=agent, model=model, case=case,
                                      id=f'{method}__{agent}__{model}__{case}'))
     if not rows:
-        raise ValueError('Selection contains no valid combinations (Codex requires gpt-5.6-sol)')
+        raise ValueError('Selection contains no supported method/agent/model combinations')
     return rows, skipped
 
 
 def fixed_cases():
-    path = ROOT / 'config/deepswe-pilot-cases.txt'
+    path = ROOT / 'config/studies/deepswe-113.txt'
     return [line for line in path.read_text().splitlines() if line and not line.startswith('#')]
 
 
@@ -96,11 +103,21 @@ def read_settings():
             secrets[key] = words[0] if words else ''
     settings = {'models': {}, 'images': raw.get('images', {}),
                 'runtime_paths': raw.get('runtime_paths', {})}
-    for index, name in enumerate((*MODELS, 'agent_diet_auxiliary')):
+    if raw.get('methods'):
+        settings['methods'] = raw['methods']
+    if raw.get('verified_evaluation'):
+        settings['verified_evaluation'] = raw['verified_evaluation']
+    if 'retention_mode' in raw:
+        from .retention import retention_mode
+        settings['retention_mode'] = retention_mode(raw)
+    # Keep legacy in-memory credential references stable when adding models.
+    for index, name in enumerate((*MODELS, 'agent_diet_auxiliary', 'Qwen3-Coder-Next')):
         if name == 'agent_diet_auxiliary':
             item = dict(raw.get(name, {}))
         else:
             candidates = [v for v in raw.get('models', {}).values() if v.get('name') == name]
+            if name not in MODELS and not candidates:
+                continue
             item = dict(candidates[0]) if candidates else {}
         key = item.get('api_key_env', '')
         # Legacy filled templates accidentally contained literal keys here.
@@ -121,8 +138,18 @@ def preflight(settings, credentials, rows):
     from .loading import load_adapter
     from .components import load_component
     errors, notes = [], []
+    if any(r['method'] == 'turn_control' and r['model'] not in BUDGET and not r.get('baseline_id')
+           and not settings.get('methods', {}).get('turn_control') for r in rows):
+        errors.append('turn_control: freeze a matching baseline budget for the common-model group before execution')
+    for method in ('attn_compress', 'swe_pruner_pro', 'eet'):
+        if any(r['method'] == method for r in rows):
+            adapter = load_adapter(load_component(ROOT / 'methods' / method, 'method', {}))
+            try:
+                adapter.validate_options(settings.get('methods', {}).get(method, {}))
+            except ValueError as error:
+                errors.append(f'{method}: {error}')
     for name in sorted({r['model'] for r in rows}):
-        item = settings['models'][name]
+        item = settings['models'].get(name, {})
         for key in ('provider', 'model_id', 'protocol', 'base_url', 'api_key_env'):
             if not item.get(key):
                 errors.append(f'{name}: missing {key}')
@@ -174,17 +201,66 @@ def experiment(row, settings, path):
     from .models import ModelConfig
     model = settings['models'][row['model']]
     options = {}
-    if row['method'] == 'turn_control':
-        options = {'budget_profile': BUDGET[row['model']]}
+    dataset = row.get('dataset', 'deepswe')
+    method = row['method']
+    if method == 'turn_control':
+        if row.get('method_options'):
+            options = row['method_options']
+        elif dataset == 'deepswe' and settings.get('methods', {}).get(method):
+            options = settings['methods'][method]
+        else:
+            options = {'budget_profile': (BUDGET[row['model']] if dataset == 'deepswe' else
+                       {'gpt-5.6-sol': 'gpt', 'claude-opus-5': 'claude'}[row['model']])}
     elif row['method'] == 'agent_diet':
         helper = settings['agent_diet_auxiliary']
         options = dict(helper_model='gpt-5-mini', helper_base_url=helper['base_url'],
                        helper_api_key_env=helper['api_key_env'])
+    elif method in ('attn_compress', 'swe_pruner_pro', 'eet'):
+        options = dict(settings.get('methods', {}).get(method, {}))
+        if method == 'eet' and dataset == 'deepswe':
+            options['retrieval_scope'] = 'cross_repository'
+    if method == 'run_free' and row.get('language', 'python') != 'python':
+        method = 'run_free_multilingual'
     return ExperimentConfig(path,
-        load_component(ROOT / 'methods' / row['method'], 'method', options),
+        load_component(ROOT / 'methods' / method, 'method', options),
         load_component(ROOT / 'agents' / AGENT_DIR[row['agent']], 'agent', agent_options(row['agent'], model, settings)),
-        load_component(ROOT / 'datasets/deepswe', 'dataset', {'task_ids': [row['case']]}),
+        load_component(ROOT / 'datasets' / DATASETS[dataset], 'dataset', {'task_ids': [row['case']]}),
         ModelConfig(**{k: model[k] for k in ('name', 'provider', 'model_id', 'protocol', 'base_url', 'api_key_env')}))
+
+
+def freeze_profiles(rows, settings, budgets=None, *, library_root=None):
+    """Share resolved options across tasks; keep multilingual method selection explicit."""
+    from .config import config_dict
+    profiles = {}
+    for row in rows:
+        key = '__'.join((row.get('dataset', 'deepswe'), row['method'], row['agent'], row['model'],
+                         'multilingual' if row['method'] == 'run_free' and row.get('language', 'python') != 'python'
+                         else 'default'))
+        row['profile_id'] = key
+        if key not in profiles:
+            resolved = row
+            if row['method'] == 'turn_control' and row.get('baseline_id'):
+                budget = (budgets or {}).get(row['baseline_id'])
+                if budget is None:
+                    continue
+                resolved = {**row, 'method_options': {'frozen_budget': budget}}
+            config = config_dict(experiment(resolved, settings, ROOT / 'experiments/paper.toml'))
+            if row['method'] == 'eet' and library_root is not None:
+                import shutil
+                from methods.eet.adapter import MINI, TRAE
+                options = config['method']['options']
+                library = Path(options.get('experience_library') or (
+                    TRAE / 'prompt/extracted_experiences_summarized_merged.jsonl' if row['agent'] == 'trae' else
+                    MINI / 'experience/extracted_experiences_summarized.jsonl'))
+                library_root.mkdir(parents=True, exist_ok=True)
+                target = library_root / (key + '.jsonl')
+                if not target.exists():
+                    shutil.copyfile(library, target)
+                options['experience_library'] = str(target)
+            config.pop('path')
+            config['dataset']['options'].pop('task_ids')
+            profiles[key] = config
+    return profiles
 
 
 def worker(payload_path):
@@ -194,13 +270,22 @@ def worker(payload_path):
     payload = json.loads(payload_path.read_text())
     row, settings = payload['row'], payload['settings']
     directory = payload_path.parent / 'run'
-    config = experiment(row, settings, payload_path)
+    if payload.get('profile'):
+        from .config import restore_experiment
+        config = restore_experiment(payload['profile'], payload_path, task_id=row['case'])
+    else:
+        config = experiment(row, settings, payload_path)
+    if (directory / 'config.json').exists():
+        # Moving a finished pilot retains its original path via a symlink. Keep
+        # the saved configuration identity while using the new output location.
+        config = replace(config, path=Path(json.loads((directory / 'config.json').read_text())['path']))
     runtime = payload['runtime']
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     result = {'status': 'interrupted'}
     try:
         with span(payload_path.parent, 'case_total', case_id=row['case']):
-            run_experiment(config, runtime, directory, resume=(directory / 'state.json').exists())
+            run_experiment(config, runtime, directory, resume=(directory / 'state.json').exists(),
+                           pricing=payload.get('pricing'))
             with span(payload_path.parent, 'evaluation', case_id=row['case']):
                 evaluate(directory, 'local', execute=True)
             with span(payload_path.parent, 'analysis'):
@@ -223,7 +308,8 @@ def worker(payload_path):
         elif result['status'] == 'completed' and native_report.get('cases', {}).get(row['case'], {}).get('status') == 'not_submitted':
             result['status'] = 'not_submitted'
     except BaseException as error:
-        result = {'status': 'failed', 'error_type': type(error).__name__, 'error': str(error)}
+        result = {'status': 'interrupted' if isinstance(error, KeyboardInterrupt) else 'failed',
+                  'error_type': type(error).__name__, 'error': str(error)}
         raise
     finally:
         result['timing_seconds'] = totals(payload_path.parent)
@@ -231,104 +317,148 @@ def worker(payload_path):
     return 0 if result['status'] == 'completed' else 1
 
 
-def summarize(output, rows):
-    records = []
-    for row in rows:
-        parent = output / 'combinations' / row['id']
-        result = json.loads((parent / 'result.json').read_text()) if (parent / 'result.json').exists() else {'status': 'pending'}
-        report_path = Path(result['analysis_directory']) / 'accounting.json' if result.get('analysis_directory') else parent / 'run/accounting.json'
-        report = json.loads(report_path.read_text()) if report_path.exists() else {}
-        records.append({**row, **result, 'directory': str(parent),
-                        'original': report.get('original_token_accounting'),
-                        'corrected': report.get('corrected_token_accounting'),
-                        'overhead': report.get('overhead'), 'timing_seconds': totals(parent)})
-    write_json(output / 'summary.json', {'version': 1, 'cases': records,
-        'timing_note': 'Nested and overlapping spans are not additive. Method callbacks include auxiliary API waits. Snapshot overhead is separate. Raw timing.jsonl and HTTP metadata support recalibration.'})
-    columns = ['method', 'agent', 'model', 'case', 'status', 'resolved', 'directory']
-    columns += [f'{account}_{metric}' for account in ('original', 'corrected') for metric in ('input', 'output', 'total')]
-    columns += ['timing_seconds', 'overhead']
-    with (output / 'summary.csv').open('w', newline='', encoding='utf-8') as stream:
-        writer = csv.DictWriter(stream, fieldnames=columns)
-        writer.writeheader()
-        for record in records:
-            flat = {k: record.get(k) for k in columns[:7]}
-            for account in ('original', 'corrected'):
-                for metric in ('input', 'output', 'total'):
-                    flat[f'{account}_{metric}'] = (record[account] or {}).get('metrics', {}).get(metric, {}).get('sum')
-            for key in ('timing_seconds', 'overhead'):
-                flat[key] = json.dumps(record.get(key), ensure_ascii=False)
-            writer.writerow(flat)
-    return records
-
-
-def main(argv=None):
-    args = parser().parse_args(argv)
-    if args._worker:
-        return worker(args._worker)
-    if args.jobs < 1:
-        raise ValueError('--jobs must be positive')
-    settings, credentials = read_settings()
-    output = (args.resume or args.output or ROOT / 'runs' / ('deepswe-pilot-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))).resolve()
-    if any(',' in str(path) or ':' in str(path) for path in (ROOT, output)):
-        raise ValueError('Docker mount paths must not contain commas or colons')
+def select_run(args, settings):
     if args.resume:
-        if any(v is not None for v in (args.method, args.model, args.agent, args.case, args.cases)):
+        output = args.resume.resolve()
+        if any(v is not None for v in (args.dataset, args.method, args.model, args.agent, args.case, args.cases)):
             raise ValueError('--resume uses the saved selection; only --jobs may change')
         manifest = json.loads((output / 'pilot.json').read_text())
         rows, skipped = manifest['rows'], []
         if settings != manifest['settings']:
             raise ValueError('Settings differ from saved run; restore settings or start a new output directory')
+    elif args.study:
+        from .study import load_study, study_rows
+        study = load_study(args.study)
+        rows, skipped = study_rows(study), []
+        manifest = dict(version=2, study=study, rows=rows, settings=settings,
+                        host_system=platform.system(), relaxed_storage=platform.system() == 'Darwin',
+                        platform='linux/amd64', cases=list(dict.fromkeys(r['case'] for r in rows)))
+        output = args.output.resolve() if args.output else run_directory(rows, ROOT / 'runs')
     else:
-        cases = fixed_cases()
+        dataset = args.dataset or 'deepswe'
+        from .study import task_catalog
+        catalog = task_catalog(dataset)
+        cases = fixed_cases() if dataset == 'deepswe' else list(catalog)
         if args.case:
-            from datasets.deepswe.tasks import select_tasks
             requested = list(dict.fromkeys(args.case.split(',')))
-            selected = select_tasks(task_ids=requested)
-            if {r.task.instance_id for r in selected} != set(requested):
+            if set(requested) - catalog.keys():
                 raise ValueError('Unknown --case task ID')
             cases = requested
         elif args.cases is not None:
-            if not 1 <= args.cases <= len(cases):
-                raise ValueError(f'--cases must be between 1 and {len(cases)}')
-            cases = cases[:args.cases]
-        else:
-            cases = [DEFAULT_CASE]
-        rows, skipped = matrix(selection(args.method, METHODS, 'method'), selection(args.agent, AGENTS, 'agent'),
-                               selection(args.model, MODELS, 'model'), cases)
-        if 'run_free' in {r['method'] for r in rows}:
-            from datasets.deepswe.tasks import select_tasks
-            if any(r.language != 'python' for r in select_tasks(task_ids=cases)):
-                raise ValueError('run_free requires Python tasks; select Python cases or another method')
+            if args.cases < 1:
+                raise ValueError('--count/--cases must be positive')
+        rows, skipped = matrix(selection(args.method or ','.join(METHODS), SUPPORTED_METHODS, 'method'),
+                               selection(args.agent, AGENTS, 'agent'),
+                               selection(args.model or ','.join(MODELS), SUPPORTED_MODELS, 'model'), cases)
+        for row in rows:
+            row.update(dataset=dataset, language=catalog[row['case']]['language'])
+            if dataset != 'deepswe':
+                row['id'] = dataset + '__' + row['id']
         manifest = dict(version=1, rows=rows, settings=settings, host_system=platform.system(),
                         relaxed_storage=platform.system() == 'Darwin',
                         platform='linux/amd64', cases=cases)
-    errors, notes = preflight(settings, credentials, rows)
-    print(f'Output: {output}\nCombinations: {len(rows)}; jobs: {args.jobs}', flush=True)
-    for row in rows:
-        print(f"  {row['method']} / {row['agent']} / {row['model']} / {row['case']}")
-    for message in skipped:
-        print('SKIP:', message)
-    for message in notes:
-        print('NOTE:', message)
-    for message in errors:
-        print('MISSING:', message)
-    if errors or args.dry_run:
-        return 2 if errors else 0
-    # Snapshot only sanitized configuration. Never serialize process environment.
-    if not args.resume:
-        output.mkdir(parents=True, exist_ok=False)
-        write_json(output / 'pilot.json', manifest)
-    elif platform.system() != manifest['host_system']:
-        raise ValueError('Resume on the original host platform; start a new output for Linux measurements')
+        if not args.rerun:
+            from .pilot_history import filter_history
+            roots = {ROOT / 'runs'}
+            if args.output:
+                roots.add(args.output.resolve().parent)
+            rows, history, warnings = filter_history(rows, settings, roots)
+            for item in history:
+                print(f"SKIP already recorded: {item['row']['id']} [{item['status']}] -> {item['source']}")
+            for warning in warnings:
+                print('WARNING:', warning)
+            if not rows:
+                print('All selected combinations are already recorded; no experiment started. Use --resume or --rerun explicitly.')
+                return None
+            manifest.update(rows=rows, skipped_history=history)
+        if not args.case:
+            rows = next_rows(rows, args.cases or 1)
+            manifest.update(rows=rows, cases=list(dict.fromkeys(r['case'] for r in rows)),
+                            requested_cases_per_combination=args.cases or 1)
+            print(f'Sequential selection: up to {args.cases or 1} remaining cases per model/agent/method; '
+                  f'{len(rows)} case combinations selected.')
+        manifest['dedup_reservation'] = True
+        output = args.output.resolve() if args.output else run_directory(rows, ROOT / 'runs')
+    return rows, skipped, manifest, output
+
+
+def case_runtime(row, settings, manifest, images, parent, *, resume=False):
+    item = settings['models'][row['model']]
+    runtime = dict(network='none', retain_files=True, never_regenerate=True, relaxed_storage=manifest['relaxed_storage'],
+        images={row['case']: images[row['agent']][row['case']]},
+        verifier_images={row['case']: images['verifier'][row['case']]} if row.get('dataset', 'deepswe') == 'deepswe' else {},
+        verifier_python=settings.get('runtime_paths', {}).get('verifier_python') or '/opt/tokenana/bin/python',
+        model_channel={'kind': 'unix_socket', 'python': settings.get('runtime_paths', {}).get('python_executable') or '/opt/tokenana/bin/python'},
+        environment_names=[item['api_key_env']])
+    runtime['retention_mode'] = manifest.get('retention_mode', 'full')
+    if row.get('dataset') == 'verified':
+        runtime['command_prefix'] = []
+        runtime['verified_evaluation'] = {**settings.get('verified_evaluation', {}),
+            'image': images['verified_verifier']}
+    if row['agent'] == 'opencode':
+        runtime['opencode_config_root'] = agent_options(row['agent'], item, settings)['config_root']
+    saved_runtime = parent / 'run/runtime.json'
+    if resume and saved_runtime.exists():
+        # Resume with the exact runtime snapshot; never rewrite old evidence.
+        runtime = json.loads(saved_runtime.read_text())
+    return runtime
+
+
+def run_phases(rows, manifest, settings, output, run_one, *, jobs, stop):
+    pool = ThreadPoolExecutor(max_workers=jobs)
+    futures = set()
+    try:
+        # Bound submissions, so a fatal future cannot race thousands of queued
+        # jobs into execution before the coordinator observes the exception.
+        phases = ([r for r in rows if r['method'] == 'baseline'],
+                  [r for r in rows if r['method'] != 'baseline']) if manifest.get('study') else (rows,)
+        for phase_index, phase in enumerate(phases):
+            if manifest.get('study') and phase_index == 1:
+                from .budgets import freeze_budget
+                budgets = {}
+                for row in phase:
+                    if row['method'] == 'turn_control' and row.get('baseline_id') and row['profile_id'] not in manifest['profiles']:
+                        key = row['baseline_id']
+                        if key not in budgets:
+                            budgets[key] = freeze_budget(output, rows, configuration_id=key)
+                new_profiles = freeze_profiles(phase, settings, budgets, library_root=output / 'inputs')
+                for key, value in new_profiles.items():
+                    manifest['profiles'].setdefault(key, value)
+                write_json(output / 'pilot.json', manifest)
+            pending = iter(phase)
+            for _ in range(jobs):
+                row = next(pending, None)
+                if row is not None:
+                    futures.add(pool.submit(run_one, row))
+            while futures:
+                done, futures = wait(futures, return_when=FIRST_COMPLETED)
+                for future in done:
+                    future.result()
+                summarize(output, rows)
+                for _ in done:
+                    row = next(pending, None)
+                    if row is not None:
+                        futures.add(pool.submit(run_one, row))
+    except BaseException:
+        stop()
+        for future in futures:
+            future.cancel()
+        raise
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+        summarize(output, rows)
+
+
+def run_matrix(output, rows, manifest, settings, credentials, prices, *, jobs, resume):
     with (output / '.pilot.lock').open('a') as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise ValueError('This run is already active') from None
         from .pilot_images import prepare_images
-        if args.resume:
+        if resume:
             ensure_stopped(output)
-        images = prepare_images(output, rows, settings, jobs=args.jobs)
+        images = prepare_images(output, rows, settings, jobs=jobs)
         volume = 'tokenana-channel-' + uuid4().hex
         subprocess.run(['docker', 'volume', 'create', volume], check=True, stdout=subprocess.DEVNULL)
         with (output / 'channel-volumes.jsonl').open('a') as stream:
@@ -344,7 +474,7 @@ def main(argv=None):
             if (parent / 'result.json').exists():
                 result = json.loads((parent / 'result.json').read_text())
                 if result['status'] in ('completed', 'agent_failed', 'not_submitted'):
-                    if result['status'] != 'completed':
+                    if result['status'] != 'completed' or result.get('controller_cleanup_error'):
                         failures.append(row['id'])
                     return
             parent.mkdir(parents=True, exist_ok=True)
@@ -353,16 +483,10 @@ def main(argv=None):
             helper = settings['agent_diet_auxiliary']
             if row['method'] == 'agent_diet':
                 keys.append(helper['api_key_env'])
-            runtime = dict(network='none', retain_files=True, never_regenerate=True, relaxed_storage=manifest['relaxed_storage'],
-                images={row['case']: images[row['agent']][row['case']]},
-                verifier_images={row['case']: images['verifier'][row['case']]},
-                verifier_python=settings.get('runtime_paths', {}).get('verifier_python') or '/opt/tokenana/bin/python',
-                model_channel={'kind': 'unix_socket', 'python': '/opt/tokenana/bin/python'},
-                environment_names=[item['api_key_env']])
-            if row['agent'] == 'opencode':
-                runtime['opencode_config_root'] = agent_options(row['agent'], item, settings)['config_root']
+            runtime = case_runtime(row, settings, manifest, images, parent, resume=resume)
             payload = parent / 'payload.json'
-            write_json(payload, dict(row=row, settings=settings, runtime=runtime))
+            write_json(payload, dict(row=row, settings=settings, runtime=runtime, pricing=prices,
+                                    profile=manifest.get('profiles', {}).get(row.get('profile_id'))))
             name = 'tokenana-controller-' + uuid4().hex
             command = ['docker', 'run', '--name', name, '--init', '--platform', 'linux/amd64',
                 '-v', f'{ROOT}:{ROOT}:ro', '-v', f'{output}:{output}', '-v', '/var/run/docker.sock:/var/run/docker.sock',
@@ -370,6 +494,9 @@ def main(argv=None):
                 '-e', 'TOKENANA_CHANNEL_ROOT=/tc', '-e', f'TOKENANA_CHANNEL_VOLUME={volume}']
             for key in keys:
                 command += ['-e', key]
+            if row['method'] == 'swe_pruner_pro':
+                head = settings['methods']['swe_pruner_pro']['head']
+                command += ['-v', f'{head}:{head}:ro']
             command += [images['controller'], '/opt/tokenana/bin/python', '-B', '-m', 'src.pilot', '--_worker', str(payload)]
             env = {**os.environ, **{k: credentials.get(k, os.environ.get(k, '')) for k in keys}}
             print('START:', row['id'], flush=True)
@@ -381,45 +508,167 @@ def main(argv=None):
                     process = subprocess.Popen(command, stdout=log, stderr=log, env=env)
                     active[name] = process
                 try:
-                    code = process.wait()
+                    from .pilot_progress import Progress
+                    progress = Progress(parent)
+                    def poll_progress():
+                        try:
+                            progress.poll()
+                        except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+                            print('Progress read unavailable:', type(error).__name__, flush=True)
+                    while True:
+                        poll_progress()
+                        try:
+                            code = process.wait(timeout=2)
+                            poll_progress()
+                            break
+                        except subprocess.TimeoutExpired:
+                            continue
                 finally:
                     with active_lock:
-                        active.pop(name, None)
+                        if process.poll() is not None:
+                            active.pop(name, None)
             if code:
                 failures.append(row['id'])
                 if not (parent / 'result.json').exists():
                     write_json(parent / 'result.json', {'status': 'failed', 'returncode': code,
                                'error': 'Controller exited before saving a result; inspect launcher.log'})
             # Controller contains no task state; retain it on failures for diagnosis.
-            write_json(parent / 'controller.json', {'name': name, 'returncode': code, 'retained': bool(code)})
+            retained = True
             if not code:
-                subprocess.run(['docker', 'rm', name], check=True, stdout=subprocess.DEVNULL)
+                try:
+                    subprocess.run(['docker', 'rm', name], check=True, stdout=subprocess.DEVNULL, timeout=120)
+                    retained = False
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+                    # The experiment result remains valid; keep cleanup failure visible.
+                    result = json.loads((parent / 'result.json').read_text())
+                    result['controller_cleanup_error'] = type(error).__name__
+                    write_json(parent / 'result.json', result)
+                    failures.append(row['id'])
+            write_json(parent / 'controller.json', {'name': name, 'returncode': code, 'retained': retained})
             print('END:', row['id'], 'exit', code, flush=True)
-        pool = ThreadPoolExecutor(max_workers=args.jobs)
-        futures = []
-        try:
-            for row in rows:
-                futures.append(pool.submit(run_one, row))
-            for future in as_completed(futures):
-                future.result()
-                summarize(output, rows)
-        except BaseException:
+        def stop():
             stopping.set()
-            for future in futures:
-                future.cancel()
             with active_lock:
                 names = list(active)
             for name in names:
-                # SIGINT gives worker finally blocks a chance to archive containers.
+                # SIGINT lets workers archive task containers before exiting.
                 subprocess.run(['docker', 'kill', '--signal', 'SIGINT', name], capture_output=True)
-            raise
+        try:
+            run_phases(rows, manifest, settings, output, run_one, jobs=jobs, stop=stop)
         finally:
-            pool.shutdown(wait=True, cancel_futures=True)
-            summarize(output, rows)
-            # Keep the volume; interrupted containers may still depend on it.
+            # Interrupted containers may still depend on the volume.
             write_json(output / 'channel-volume.json', {'name': volume, 'retained': True})
-    print(f'Results: {output / "summary.csv"}\nResume: bash scripts/run-deepswe-pilot.sh --resume {shlex.quote(str(output))}')
+    return failures
+
+
+def main(argv=None):
+    with ExitStack() as stack:
+        return _main(argv, stack)
+
+
+def _main(argv, stack):
+    args = parser().parse_args(argv)
+    if args.study and any(v is not None for v in
+            (args.dataset, args.method, args.model, args.agent, args.case, args.cases, args.resume, args.summarize, args.pricing)):
+        raise ValueError('--study fixes the matrix and prices; do not combine it with ad-hoc selectors or resume')
+    if args.study and args.rerun:
+        raise ValueError('A study has one generation per task; use --resume for recovery')
+    if args.rerun and (args.resume or args.summarize):
+        raise ValueError('--rerun is only for a new run, not --resume/--summarize')
+    if args._worker:
+        return worker(args._worker)
+    if args.summarize:
+        if args.dry_run or any(v is not None for v in (args.dataset, args.method, args.model, args.agent, args.case, args.cases)):
+            raise ValueError('--summarize uses saved selections and cannot combine with --dry-run')
+        records = refresh(args.summarize, args.pricing)
+        print_summary(records)
+        print(f'Refreshed {len(records)} combinations: {args.summarize / "summary.md"}')
+        return 0
+    if args.resume and args.pricing:
+        raise ValueError('Resume preserves saved pricing; use --summarize --pricing to reprice offline')
+    if args.jobs < 1:
+        raise ValueError('--jobs must be positive')
+    history_lock = None
+    if not args.resume and not args.dry_run:
+        (ROOT / 'runs').mkdir(parents=True, exist_ok=True)
+        history_lock = stack.enter_context((ROOT / 'runs/.pilot-history.lock').open('a'))
+        fcntl.flock(history_lock, fcntl.LOCK_EX)
+    settings, credentials = read_settings()
+    selected = select_run(args, settings)
+    if selected is None:
+        return 0
+    rows, skipped, manifest, output = selected
+    if any(',' in str(path) or ':' in str(path) for path in (ROOT, output)):
+        raise ValueError('Docker mount paths must not contain commas or colons')
+    if manifest.get('study'):
+        measurement_jobs = manifest['study']['execution'].get('measurement_jobs', 1)
+        if args.jobs != measurement_jobs:
+            raise ValueError('Paper execution requires the frozen measurement_jobs; validation concurrency is separate')
+        if args.resume and manifest.get('measurement_jobs') != measurement_jobs:
+            raise ValueError('Saved study has no matching frozen measurement concurrency')
+        manifest['measurement_jobs'] = measurement_jobs
+    if not args.resume:
+        from .retention import retention_mode
+        manifest['retention_mode'] = retention_mode({'retention_mode': settings.get('retention_mode', 'research')})
+    prices = (saved_pricing(output) if args.resume else manifest['study']['pricing'] if args.study
+              else load_pricing(args.pricing) if args.pricing else load_pricing())
+    errors, notes = preflight(settings, credentials, rows)
+    if manifest.get('study') and any(r['method'] == 'turn_control' and r.get('baseline_id') for r in rows):
+        notes.append('Baseline phase precedes methods; turn_control budgets are frozen from matching native summaries.')
+    print(f'Output: {output}\nCombinations: {len(rows)}; jobs: {args.jobs}', flush=True)
+    if manifest.get('study'):
+        for config in manifest['study']['configurations']:
+            print(f"  {config['id']}: {config['selected']} fixed tasks")
+    else:
+        for row in rows:
+            print(f"  {row['method']} / {row['agent']} / {row['model']} / {row['case']}")
+    for message in skipped:
+        print('SKIP:', message)
+    for message in notes:
+        print('NOTE:', message)
+    for message in errors:
+        print('MISSING:', message)
+    if errors or args.dry_run:
+        return 2 if errors else 0
+    # Snapshot only sanitized configuration. Never serialize process environment.
+    if not args.resume:
+        if args.output:
+            output.mkdir(parents=True, exist_ok=False)
+        else:
+            output = run_directory(rows, ROOT / 'runs', create=True)
+            print(f'Reserved output: {output}', flush=True)
+        if manifest.get('study'):
+            manifest['profiles'] = freeze_profiles(rows, settings, library_root=output / 'inputs')
+        write_json(output / 'pricing.json', prices)
+        write_json(output / 'pilot.json', manifest)
+        if manifest.get('study'):
+            write_json(output / 'study.json', manifest['study'])
+        from .pilot_history import register_output
+        register_output(ROOT / 'runs', output)
+        # Publish the reservation before another launcher inspects history.
+        if history_lock:
+            fcntl.flock(history_lock, fcntl.LOCK_UN)
+    elif platform.system() != manifest['host_system']:
+        raise ValueError('Resume on the original host platform; start a new output for Linux measurements')
+    failures = run_matrix(output, rows, manifest, settings, credentials, prices,
+                          jobs=args.jobs, resume=bool(args.resume))
+    summary = json.loads((output / 'summary.json').read_text())
+    cost = summary['cost_accounting']
+    print_summary(summary['cases'])
+    print(f"Estimated cost USD: {cost['total_usd']}; known subtotal: {cost['known_subtotal_usd']}; complete={cost['complete']}")
+    print(f'Results: {output / "summary.md"}\nResume: bash scripts/run-experiments.sh --resume {shlex.quote(str(output))}')
     return 1 if failures else 0
+
+
+def next_rows(rows, count):
+    """Preserve fixed dataset order, taking N pending tasks per experiment arm."""
+    counts, selected = {}, []
+    for row in rows:
+        key = (row.get('dataset', 'deepswe'), row['method'], row['agent'], row['model'])
+        if counts.get(key, 0) < count:
+            selected.append(row)
+            counts[key] = counts.get(key, 0) + 1
+    return selected
 
 
 def ensure_stopped(output):

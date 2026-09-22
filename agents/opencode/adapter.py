@@ -1,6 +1,6 @@
 """Prepared OpenCode CLI integration; no upstream imports or package installation."""
 
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack
 import json
 from pathlib import Path
 import re
@@ -10,9 +10,9 @@ import time
 
 from src.accounting import OriginalCase
 from src.components import ConfigError
+from src.raw_usage import read_case_usage, read_case_usage_views
 from src.interfaces import AgentResult
-from src.raw_usage import read_raw_usage
-from src.patches import capture_patch
+from src.agent_artifacts import collect_agent_patch, check_session_outcome, save_patch_eligibility
 from src.workspaces import execution_timeout
 
 
@@ -25,6 +25,9 @@ _SDKS = {("openai", "responses"): "@ai-sdk/openai",
 
 
 class OpenCode:
+    read_case_usage = staticmethod(read_case_usage)
+    read_case_usage_views = staticmethod(read_case_usage_views)
+
     capabilities = ("turn_control",)
     control_runtime = "plugin"
     session_capabilities = ("events", "replace_history", "state", "reminder", "terminate")
@@ -72,9 +75,6 @@ class OpenCode:
             "small_model": "same selected model", "environment_checked": False,
             "note": "Native build agent and compaction; only the local turn-control plugin is optionally enabled",
         }
-
-    def read_case_usage(self, directory, **identity):
-        return read_raw_usage(directory / "api-records", **identity)
 
     def read_original_case(self, directory, case_id):
         path = directory / "trace.jsonl"
@@ -202,13 +202,7 @@ class OpenCode:
                     self._export_session(workspace, host, target, options, env, config)
                 except (OSError, ValueError, TypeError, AttributeError, KeyError, subprocess.SubprocessError) as error:
                     errors.append(f"OpenCode session export failed: {type(error).__name__}")
-        patch = ""
-        if process is not None:
-            try:
-                patch = capture_patch(workspace, artifacts, timeout=options.get("diff_timeout", 60))
-            except Exception as error:
-                errors.append(f"patch capture failed: {error}")
-        (host / "patch.diff").write_text(patch, encoding="utf-8")
+        patch = collect_agent_patch(workspace, artifacts, process, options, errors)
         events, tokens, count, output = [], 0, 0, ""
         try:
             events = _events(host / "trace.jsonl")
@@ -235,21 +229,13 @@ class OpenCode:
             except (OSError, ValueError, TypeError, AttributeError, KeyError):
                 control = None
                 errors.append("Missing or invalid OpenCode control/native session outcome")
-            (host / "diagnostic.diff").write_text(patch, encoding="utf-8")
+            save_patch_eligibility(host, patch, eligible)
             if not eligible:
-                (host / "patch.diff").write_text("", encoding="utf-8")
                 errors.append("Controlled generation has no eligible completed patch")
         if callback is not None:
-            try:
-                outcome = json.loads((host / "session-outcome.json").read_text())
-                if not outcome.get("complete") or outcome.get("termination"):
-                    errors.append("Incomplete or terminated method session")
-            except (OSError, ValueError):
-                errors.append("Missing method session outcome")
+            check_session_outcome(host, errors)
             eligible = not errors and bool(patch.strip())
-            if not eligible:
-                (host / "diagnostic.diff").write_text(patch, encoding="utf-8")
-                (host / "patch.diff").write_text("", encoding="utf-8")
+            save_patch_eligibility(host, patch, eligible, diagnostic_always=False)
         return AgentResult(agent_type="opencode", prompt=prompt, output=output, tokens_used=tokens,
                            exec_count=count, duration_sec=time.monotonic() - started, raw_trace=events,
                            error="; ".join(errors) or None, artifacts=artifacts,

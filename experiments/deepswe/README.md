@@ -71,4 +71,4 @@ run_free 两版本 original 保留原非空 patch、原生日志及向下取整�
 
 corrected-v1 仅使用原 HTTP usage，包含可观察失败、超时、所有尝试及辅助调用；cache/reasoning 不重复相加，缺失字段不当零。Codex 原生日志缺 usage 的默认零不作为证据；压缩或采样覆盖无法佐证时原生 token 保持 null。新的 accounting_context、逐 case prompt_metadata/native_final_summary 记录实际提示版本、补丁规则及摘要来源，辅助静态审阅和离线重建。其他工作线的 overhead 分组原样保留，没有推断尚未映射的调用用途。
 
-完整静态审查和未验证项见 docs/deepswe-delivery.md；本目录没有实验结果。
+完整静态审查和未验证项见 docs/development-workflow.md；本目录没有实验结果。
