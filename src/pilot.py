@@ -65,6 +65,10 @@ def matrix(methods, agents, models, cases):
     for method in methods:
         for agent in agents:
             for model in models:
+                if method == 'baseline' and agent == 'mini' and model in (
+                        'gpt-5.6-sol', 'claude-opus-5', 'qwen3.8-max'):
+                    skipped.append(f'{method}/{agent}/{model}: mini baseline excluded from ad-hoc runs')
+                    continue
                 if not supported(method, agent, model):
                     skipped.append(f'{method}/{agent}/{model}: outside the supported method/agent/model matrix')
                     continue
