@@ -51,6 +51,28 @@ class SelectedClient(LLMClient):
         super().__init__(config)
         if config.model_provider.provider == "anthropic":
             self.client = CachedAnthropic(config)
+        elif config.model_provider.provider == 'google':
+            # Only choose the transport endpoint. Native Google message/tool
+            # conversion and retry policy remain in the original client.
+            from google import genai
+            from trae_agent.utils.llm_clients.google_client import GoogleClient
+            class RecordedGoogle(GoogleClient):
+                def __init__(self, model_config):
+                    super().__init__(model_config)
+                    self.client.close()
+                    self.client = genai.Client(api_key=self.api_key,
+                        http_options={'base_url': model_config.model_provider.base_url})
+                    self.evidence_purpose = ('main' if model_config.model_provider.base_url == os.environ.get('GOOGLE_BASE_URL')
+                                             else 'agent_auxiliary')
+
+                def _create_google_response(self, *args, **kwargs):
+                    response = super()._create_google_response(*args, **kwargs)
+                    directory = os.environ.get('TOKENANA_EVIDENCE_DIR')
+                    if directory:
+                        with (Path(directory) / ('selected-google-' + self.evidence_purpose + '.jsonl')).open('a') as stream:
+                            stream.write(json.dumps(response.model_dump(mode='json', by_alias=True)) + '\n')
+                    return response
+            self.client = RecordedGoogle(config)
         elif os.environ.get("TOKENANA_PROTOCOL") == "chat_completions":
             self.client = OpenAICompatibleClient(config, DirectChatProvider())
             self.provider = SimpleNamespace(value=os.environ["TOKENANA_PROVIDER"])

@@ -10,7 +10,7 @@ import time
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from .usage_protocols import API_PATHS
+from .usage_protocols import API_PATHS, api_path_supported
 
 
 HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -58,6 +58,7 @@ def recording_proxy(directory: Path, upstream_base_url: str, *, timeout: float =
     attribution = validate_attribution(attribution or {})
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=False)
+    _save(directory / 'session.json', {'protocol': protocol, 'closed': False})
     active = set()
     lock = threading.Lock()
 
@@ -96,7 +97,7 @@ def recording_proxy(directory: Path, upstream_base_url: str, *, timeout: float =
                 if not admitted:
                     self.reject(503, "Required agent control plugin is not initialized")
                     return
-            if self.path not in API_PATHS[protocol]:
+            if not api_path_supported(self.path, protocol):
                 self.reject(404, "API path is not covered by recorder")
                 return
             if self.headers.get("Transfer-Encoding"):
@@ -111,6 +112,11 @@ def recording_proxy(directory: Path, upstream_base_url: str, *, timeout: float =
                 return
             base = upstream.path.rstrip("/")
             suffix = self.path.removeprefix("/v1")
+            if protocol == 'gemini_generate_content':
+                # Native SDKs include the API version and model in the URL.
+                suffix = self.path
+                if base.endswith(('/v1', '/v1beta')):
+                    base = base.rsplit('/', 1)[0]
             if protocol == "anthropic_messages" and not base.endswith("/v1"):
                 base += "/v1"
             request_id = uuid4().hex
@@ -139,6 +145,8 @@ def recording_proxy(directory: Path, upstream_base_url: str, *, timeout: float =
                     request = json.loads(body)
                     if isinstance(request, dict):
                         metadata["model"] = request.get("model")
+                        if protocol == 'gemini_generate_content':
+                            metadata['model'] = urlsplit(self.path).path.split('/models/', 1)[1].split(':', 1)[0]
                     metadata["cache_control_observed"] = _has_cache_control(request)
                     metadata["stream_usage_requested"] = (
                         request.get("stream_options", {}).get("include_usage")
@@ -157,7 +165,7 @@ def recording_proxy(directory: Path, upstream_base_url: str, *, timeout: float =
                 connection_headers = {name.strip().lower() for name in
                                       self.headers.get("Connection", "").split(",")}
                 headers = {key: value for key, value in self.headers.items()
-                           if key.lower() not in HOP_HEADERS | connection_headers}
+                           if key.lower() not in HOP_HEADERS | connection_headers | {'x-tokenana-call'}}
                 headers["Connection"] = "close"
                 metadata['forwarded_at'] = time.time()
                 _save(output / 'metadata.json', metadata)
@@ -215,7 +223,7 @@ def recording_proxy(directory: Path, upstream_base_url: str, *, timeout: float =
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
     thread.start()
     try:
-        prefix = "" if protocol == "anthropic_messages" else "/v1"
+        prefix = "" if protocol in ("anthropic_messages", "gemini_generate_content") else "/v1"
         yield f"http://127.0.0.1:{server.server_port}{prefix}"
     finally:
         server.shutdown()
@@ -225,3 +233,4 @@ def recording_proxy(directory: Path, upstream_base_url: str, *, timeout: float =
             conn.close()
         server.server_close()
         thread.join()
+        _save(directory / 'session.json', {'protocol': protocol, 'closed': True})

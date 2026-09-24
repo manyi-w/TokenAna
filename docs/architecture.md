@@ -8,7 +8,7 @@
 - datasets 目录负责公共任务映射、隔离工作区、提交与原评测器。Task 仅暴露 ID、仓库、基准提交和任务说明；隐藏测试和参考补丁只进入评测侧。
 - `src/containers.py` 管理共用的任务容器生命周期；数据集保留工作目录、网络、配额、挂载及提交规则。src/execution.py 复用统一执行、记录、恢复；src/pilot.py 分开处理选择/恢复、runtime 构造、阶段调度和控制器运行。
 - src/study.py 管理研究选择；src/accounting_v2.py、research_evidence.py、research_diagnostics.py、study_report.py 和 research_figures.py 负责公共研究统计、分析及产物，不复制执行引擎。
-- usage 校验不计算统计报表；同一 HTTP 证据只解码一次，再按 legacy 与真正转发口径生成视图。v1/v2 的冲突规则、分母、unknown 和完整性分别保留。`src/tabular.py` 共用表格输出，保留旧报表的 null/bool 文本与原子写入，以及 study 的追加列约定。
+- usage 校验不计算统计报表；同一 HTTP 证据只解码一次，只保留实际转发的 v2 统计视图。`accounting_trace.py` 的算术表达式直接产生结果与可复算步骤；`accounting_explain.py`、`rq1_explain.py` 负责三方对照导出，不复制统计公式。`src/tabular.py` 共用表格输出，保留旧报表的 null/bool 文本与原子写入，以及 study 的追加列约定。
 
 框架支持六方法、四 agent、已确定模型和两数据集；论文只选择 experiments/paper.toml 的 109 配置、12,278 次任务。DeepSWE 为 106×113，Verified 为 3×100，无 Verified baseline。任务清单保留原 34 条 Python 顺序后补齐五语言。
 
@@ -45,7 +45,7 @@ Verified 使用本地官方 swebench.harness.run_evaluation，保存命令、std
 
 ## 统计与证据
 
-[统计协议](accounting-protocol.md) 定义 original/corrected-v1/corrected-v2-api、逐指标完整性、偏差桥接、费用、排名与 bootstrap。细粒度 token 来自 API；按任务、请求、模型、用途、HTTP 结果拆分。内容仅按结构分类与消息版本诊断，用户已确认不恢复研究 tokenizer。
+[统计协议](accounting-protocol.md) 定义 original/cache_only/corrected-v2-api、逐指标完整性、偏差桥接、费用、排名与 bootstrap。细粒度 token 来自 API；按任务、请求、模型、用途、HTTP 结果拆分。内容仅按结构分类与消息版本诊断，用户已确认不恢复研究 tokenizer。
 
 本地 forward 与生成 API usage 分账。AttnCompress 保留文本不是生成输出；SWE-Pruner wrapper 与后端分别记录但不重复归账。SGLang 后端只有提供逐 forward telemetry 时才能报告真实 forward 数；仅有提交 input_ids 的请求不能充当模型 forward 证据，缺失时明确 unknown。自托管主生成按 main 用途计 usage，没有冻结价表则费用不排名。
 
@@ -55,12 +55,16 @@ Verified 使用本地官方 swebench.harness.run_evaluation，保存命令、std
 
 full 增加逐请求文件系统增量和完整容器归档。原始 HTTP、原生轨迹、方法前后快照、配置、价格、补丁、评测和失败记录在两种模式都保留。research 不能还原整个 OS 或每个中间文件；最终工作区恢复依赖原镜像与记录的挂载。归档可读性及条目完整性验证成功后才清理容器。
 
-用户已要求清空旧试跑的 runs/ 输出及本地 Git 中对应副本，包括中断试跑的环境归档。当前保留源码、运行配置、任务数据、原方法资源和评测器，旧运行记录与环境不可再恢复；新实验仍按上述策略生成并留存结果。
+用户已要求清空旧试跑的 runs/ 输出及本地 Git 中对应副本，包括中断试跑的环境归档。当时清理的旧运行不可恢复；随后新生成的运行及其原始证据按上述策略保留。本次仅重建/清理旧统计派生产物。
 
 凭据不进入配置快照、请求头日志或构建上下文。研究图表和抽查样本使用证据路径，不复制完整提示。time 区间按阶段取并集；墙钟已经包含阻塞、方法和观测开销，嵌套阶段不能相加。
 
 ## 当前状态
 
-软件实现与实际验收分别记录在 [开发流程](development-workflow.md)。真实组件矩阵、GPU 后端逐 forward 观测和完整论文运行不能由配置展开、模块导入或假模型测试推断为完成。无差异、未触发和证据不足均是合法研究结果。
+RQ1 的四个 `run.sh` 通过 `src/rq1_run.py` 复用公共执行器、恢复、research 留存和官方评测。`src/rq1_native.py` / `src/rq1_expert.py` 负责原调用传输、配置与观测；run_free 保留原 Claude CLI 1.0.16 和提示/Git 约束，AgentDiet/AttnCompress 使用原 Expert，turn_control 使用已批准的现代 Trae 同会话控制器。原算法不修改，不另建执行引擎。Gemini 原生 generateContent 与 OpenAI 兼容协议分别记录 usage，缓存/reasoning 按字段包含关系规范化。
 
-开发期测试与专用验证产物确认通过后清理，不作为仓库长期组成部分；主实验所需的配置、统计与留存校验及官方评测器继续保留。
+独立 [RQ1](../RQ1/README.md) 固定 run_free/Sonnet 4.5 前 100 题、turn_control/正式版 Gemini 2.5 Pro 原 100 题、AttnCompress/Gemini 3 Flash 及 AgentDiet/Gemini 2.5 Pro 各 200 题。turn_control 为 29→45，历史 preview 06-05 与新正式版分栏。`paper-values.toml` 保存论文印刷操作数，`src/rq1_report.py` 输出论文值、新 original、同轨迹完整 v2 和 cache_only；方法 historical reader 保留原筛选与计价规则，`replay.sh` 仅复算历史。历史 Gemini 确有缓存命中，但完整历史 API 覆盖仍不足；新入口已接线，四组真实组件与正式运行尚未验收。
+
+turn_control 已知缓存命中的两套补充价格情景及费用数字保存在 [RQ1 文档](../RQ1/README.md#turn_control-已知缓存命中的费用补算)，直接以论文印刷费用为操作数。局部补算与完整缓存校正分开：缺字段维持未知，情景费用不代填完整 cache_only/v2，也不覆盖新运行的冻结价格。
+
+RQ1 AgentDiet 按用户约定将作者接口视为标准 Gemini OpenAI 兼容接口；该语义下原 Trae 主模型统计不会因额外读取顶层缓存字段而重复相加。研究重点为原费用假设及辅助模型的固定缓存扣除。此约定不更换原客户端协议，不改原算法，也不替代缺失的逐调用证据；实际新响应始终据实留存和统计。

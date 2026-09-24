@@ -125,8 +125,11 @@ def load_outcome(directory, budget=None):
 
 
 def final_summary(directory):
+    from src.accounting_trace import atom, calc, constant
     control, parts, messages, finished = load_outcome(directory)
     counts = {"input": [], "output": []}
+    native = _read(directory / 'session.json')
+    locations = {p['id']: f'/messages/{i}/parts/{j}/tokens' for i, m in enumerate(native['messages']) for j, p in enumerate(m['parts'])}
     covered = set()
     for part in parts.values():
         if part.get("type") != "step-finish":
@@ -138,11 +141,16 @@ def final_summary(directory):
         cache = cache if isinstance(cache, dict) else {}
         for name, values in (("input", [tokens.get("input"), cache.get("read"), cache.get("write")]),
                              ("output", [tokens.get("output"), tokens.get("reasoning")])):
-            counts[name].append(sum(values) if all(_integer(v) for v in values) else None)
+            keys = ('input', 'cache/read', 'cache/write') if name == 'input' else ('output', 'reasoning')
+            counts[name].append(calc('sum', *(atom(v if _integer(v) else None, str(directory / 'session.json'),
+                locations[part['id']] + '/' + key, description='OpenCode 原生 step-finish token 分项') for v, key in zip(values, keys))))
     requested = {turn["message_id"] for turn in control["turns"]}
     requested.update(key for key, m in messages.items() if m["info"].get("summary"))
+    calculations = {}
     def total(name):
-        values = counts[name]
-        return sum(values) if requested <= covered and all(v is not None for v in values) else None
+        node = calc('guard', calc('sum', *counts[name]), constant(requested <= covered,
+            'agents/opencode/summary.py:final_summary', '原控制请求与采样摘要覆盖校验'))
+        calculations[name] = node
+        return node['value']
     return FinalSummary(finished, sum(p.get("type") == "tool" for p in parts.values()),
-                        total("input"), total("output"), "session.json:messages.parts.step-finish; control.json")
+                        total("input"), total("output"), str(directory / "session.json") + ":messages.parts.step-finish; control.json", calculations)

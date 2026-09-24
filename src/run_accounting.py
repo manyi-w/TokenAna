@@ -1,10 +1,10 @@
 """Rebuild run accounting from persisted attempts, without executing components."""
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 from pathlib import Path
 
-from .accounting import METRICS, CaseUsage, OriginalCase, corrected_accounting
+from .accounting import METRICS, CaseUsage, OriginalCase
 from .overhead import overhead_accounting
 
 
@@ -71,13 +71,13 @@ def _artifact_directories(directory):
 
 def build_accounting(output, state, tasks, method, agent, *, pricing=None):
     output = Path(output).resolve()
-    originals, usages, api_usages, details = [], [], [], []
-    original_issues = []
+    originals, api_usages, details = [], [], []
+    original_issues, local_services = [], []
     supported = original_supported(method, agent)
     variant = getattr(agent, "original_accounting_variant", None)
     for task in tasks:
         saved = state["tasks"].get(task.instance_id, {})
-        pieces, api_pieces, local_compute, selected = [], [], [], []
+        api_pieces, local_compute, selected, task_local_services = [], [], [], []
         attempts = list(dict.fromkeys(saved.get("attempts", [])))
         for relative in attempts:
             directory = output / relative
@@ -87,31 +87,24 @@ def build_accounting(output, state, tasks, method, agent, *, pricing=None):
                 if saved.get("directory") == relative and saved.get("stage") == "preparing":
                     issues = []
             for artifact, call_id in artifacts.items():
-                from .raw_usage import read_raw_usage, read_usage_views
+                from .raw_usage import read_raw_usage
                 from .service_usage import read_services
                 identity = dict(case_id=task.instance_id, attempt_id=directory.name,
                                 call_id=f'{call_id}/{artifact.name}')
-                views = getattr(agent, 'read_case_usage_views', None)
                 reader = getattr(agent, "read_case_usage", None)
-                if views:
-                    piece, api_piece = views(artifact, **identity)
-                else:
-                    piece = (reader(artifact, **identity) if reader else
-                             _unknown(task.instance_id, 'agent raw usage reader is unavailable'))
-                    api_piece = read_raw_usage(artifact / 'api-records', **identity, forwarded_only=True)
-                pieces.append(piece)
-                api_pieces.append(api_piece)
+                api_pieces.append(reader(artifact, **identity) if reader else
+                                  read_raw_usage(artifact / 'api-records', **identity))
                 for channel in sorted((artifact / "auxiliary-records").glob("*")):
                     if channel.is_dir():
-                        legacy, api = read_usage_views(channel, **{**identity,
-                            'call_id': f'{identity["call_id"]}/aux/{channel.name}'})
-                        pieces.append(legacy)
-                        api_pieces.append(api)
+                        api_pieces.append(read_raw_usage(channel, **{**identity,
+                            'call_id': f'{identity["call_id"]}/aux/{channel.name}'}))
                 services = read_services(artifact / "service-records", case_id=task.instance_id,
                     attempt_id=directory.name, call_id=f"{call_id}/{artifact.name}/services",
                     local_compute=local_compute)
+                task_local_services.extend(o for o in services.operations if o.purpose == 'compression_service')
+                if any(o.purpose == 'unknown' for o in services.operations):
+                    api_pieces.append(_unknown(task.instance_id, 'Service purpose unknown; generation coverage cannot be established'))
                 if services.operations or services.issues:
-                    pieces.append(services)
                     # Purpose, not HTTP transport or record directory, determines
                     # whether self-hosted generation belongs in API accounting.
                     generation_ops = [o for o in services.operations if o.purpose in ('main', 'agent_auxiliary', 'method_auxiliary')]
@@ -121,19 +114,10 @@ def build_accounting(output, state, tasks, method, agent, *, pricing=None):
                             all(o.complete and not o.issues for o in generation_ops),
                             [reason for o in generation_ops for reason in o.issues], generation_ops))
             if issues:
-                pieces.append(_unknown(task.instance_id, "; ".join(issues)))
                 api_pieces.append(_unknown(task.instance_id, '; '.join(issues)))
             if saved.get("directory") == relative:
                 selected = list(artifacts)
 
-        called = (True if any(p.llm_called is True for p in pieces) else
-                  None if any(p.llm_called is None for p in pieces) else False)
-        usage = CaseUsage(task.instance_id, called,
-                          [item for p in pieces for item in p.observations],
-                          all(p.coverage_complete for p in pieces),
-                          [reason for p in pieces for reason in p.issues],
-                          [operation for p in pieces for operation in p.operations])
-        usages.append(usage)
         api_called = (True if any(p.llm_called is True for p in api_pieces) else
                       None if not attempts or any(p.llm_called is None for p in api_pieces) else False)
         api_usage = CaseUsage(task.instance_id, api_called,
@@ -141,6 +125,7 @@ def build_accounting(output, state, tasks, method, agent, *, pricing=None):
             bool(attempts) and all(p.coverage_complete for p in api_pieces),
             [s for p in api_pieces for s in p.issues], [o for p in api_pieces for o in p.operations])
         api_usages.append(api_usage)
+        local_services.extend(task_local_services)
         original = OriginalCase(task.instance_id, None, None)
         if supported and len(selected) == 1:
             try:
@@ -149,6 +134,11 @@ def build_accounting(output, state, tasks, method, agent, *, pricing=None):
                 enrich = getattr(method, "enrich_original", None)
                 if callable(enrich):
                     original = enrich(original, selected[0])
+                original = replace(original, method_data={**original.method_data,
+                    '_source': original.method_data.get('_source', str(selected[0] / 'method-state.json')),
+                    '_sources': {**original.method_data.get('_sources', {}),
+                        'case_id': {'source': str(output / 'tasks.json'), 'locator': 'instance_id=' + task.instance_id},
+                        'source_error': {'source': str(selected[0] / 'method-state.json'), 'locator': '/source_error'}}})
             except (OSError, ValueError) as error:
                 original_issues.append(f"{task.instance_id}: original files unreadable ({type(error).__name__})")
         elif supported and len(selected) > 1:
@@ -176,16 +166,14 @@ def build_accounting(output, state, tasks, method, agent, *, pricing=None):
                         "prompt_metadata": prompt_metadata,
                         "native_final_summary": asdict(diagnostic_summary) if diagnostic_summary else None,
                         "original_artifacts": [str(p.relative_to(output)) for p in selected],
-                        "corrected_usage": asdict(usage),
                         "original_token_accounting": _original_report(
                             method, [original], supported,
                             [issue for issue in original_issues if issue.startswith(task.instance_id + ":")],
-                            variant=variant),
-                        "corrected_token_accounting": corrected_accounting([usage])})
-        details[-1]["overhead"] = overhead_accounting([usage],
-            details[-1]["original_token_accounting"].get("overhead"))
+                            variant=variant)})
+        details[-1]["overhead"] = overhead_accounting([api_usage],
+            details[-1]["original_token_accounting"].get("overhead"), local_operations=task_local_services)
         from .accounting_v2 import corrected_v2
-        details[-1].update(corrected_v2_api=corrected_v2([api_usage]), api_usage=asdict(api_usage),
+        details[-1].update(corrected_v2_api=corrected_v2([api_usage], selection_source=str(output / "tasks.json")), api_usage=asdict(api_usage),
                           local_compute=local_compute, attempted=bool(attempts),
                           model_called=api_called, method_state=dict(original.method_data))
         from .research_evidence import native_evidence, normalized_native
@@ -213,7 +201,7 @@ def build_accounting(output, state, tasks, method, agent, *, pricing=None):
                         detail["control"] = calls[0].get("control")
                 except (OSError, ValueError, TypeError, AttributeError):
                     detail["control_error"] = "generation metadata unreadable"
-    report = {"schema_version": 1, "run": str(output), "run_status": state["status"],
+    report = {"schema_version": 2, "run": str(output), "run_status": state["status"],
             "accounting_context": {
                 "method_version": state.get("method_version", "legacy-unversioned"),
                 "original_agent_variant": variant or getattr(agent, "original_trace_format", None),
@@ -224,17 +212,16 @@ def build_accounting(output, state, tasks, method, agent, *, pricing=None):
                 "note": "Saved prompt/patch conventions and native compatibility; no runtime verification implied.",
             },
             "original_token_accounting": original_report,
-            "corrected_token_accounting": corrected_accounting(usages), "cases": details,
-            "overhead": overhead_accounting(usages, original_report.get("overhead")),
+            "cases": details,
+            "overhead": overhead_accounting(api_usages, original_report.get("overhead"), local_operations=local_services),
             "accounting_preflight": state.get("accounting_preflight"),
             "usage_normalization": "http-protocols-v1",
             "evaluation": evaluation,
             "coverage_note": "Recorded HTTP requests only, using each record's explicit protocol (legacy: Responses); unobserved API paths and sessions are not verified."}
-    from .pricing import attach_cost, saved_pricing
+    from .pricing import saved_pricing
     prices = pricing if pricing is not None else saved_pricing(output)
-    attach_cost(report, prices)
     from .accounting_v2 import corrected_v2, api_cost
-    report['corrected_v2_api'] = corrected_v2(api_usages)
+    report['corrected_v2_api'] = corrected_v2(api_usages, selection_source=str(output / "tasks.json"))
     report['corrected_v2_cost'] = api_cost(api_usages, prices)
     from .telemetry import intervals
     report['timing'] = intervals(output)
@@ -251,6 +238,7 @@ def build_accounting(output, state, tasks, method, agent, *, pricing=None):
     from .research_evidence import policy_bridge
     config_path = output / 'config.json'
     method_name = json.loads(config_path.read_text())['method']['name'] if config_path.exists() else type(method).__name__
+    report['method_name'] = method_name
     report['policy_bridge'] = policy_bridge(details, original_report, report['corrected_v2_api'],
                                             method_name)
     return report

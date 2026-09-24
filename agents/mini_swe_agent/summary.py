@@ -7,7 +7,8 @@ def _integer(value):
     return type(value) is int and value >= 0
 
 
-def final_summary(trajectory):
+def final_summary(trajectory, source="trajectory.json"):
+    from src.accounting_trace import atom, calc, constant
     info, messages = trajectory["info"], trajectory["messages"]
     last = messages[-1] if messages else {}
     status = info.get("exit_status")
@@ -19,7 +20,8 @@ def final_summary(trajectory):
                  or m.get("role") == "assistant" or m.get("object") == "response"]
     stats = info.get("model_stats")
     calls = stats.get("api_calls") if isinstance(stats, dict) else None
-    inputs, outputs = [], []
+    inputs, outputs, input_nodes, output_nodes = [], [], [], []
+    indices = {id(m): i for i, m in enumerate(messages)}
     for message in responses:
         response = message.get("extra", {}).get("response")
         usage = response.get("usage") if isinstance(response, dict) else None
@@ -30,12 +32,16 @@ def final_summary(trajectory):
         outgoing = usage.get("output_tokens", usage.get("completion_tokens"))
         inputs.append(incoming if _integer(incoming) else None)
         outputs.append(outgoing if _integer(outgoing) else None)
+        prefix = f'/messages/{indices[id(message)]}/' + ('extra/response/usage/' if isinstance(response, dict) and isinstance(response.get('usage'), dict) else 'usage/')
+        input_nodes.append(atom(inputs[-1], source, prefix + ('input_tokens' if 'input_tokens' in usage else 'prompt_tokens'), description='原生响应输入'))
+        output_nodes.append(atom(outputs[-1], source, prefix + ('output_tokens' if 'output_tokens' in usage else 'completion_tokens'), description='原生响应输出'))
     # A failed/missing native response must not become a measured zero.
     complete = _integer(calls) and calls == len(responses)
-    incoming = sum(inputs) if complete and all(v is not None for v in inputs) else None
-    outgoing = sum(outputs) if complete and all(v is not None for v in outputs) else None
-    return FinalSummary(finished, function_calls, incoming, outgoing,
-                        "trajectory.json:info.exit_status,model_stats.api_calls,messages")
+    counts = {name: calc('guard', calc('sum', *values, description='原生响应字段相加'),
+                constant(complete, 'agents/mini_swe_agent/summary.py:final_summary', '原 model_stats.api_calls 与原响应数一致'))
+              for name, values in (('input', input_nodes), ('output', output_nodes))}
+    return FinalSummary(finished, function_calls, counts['input']['value'], counts['output']['value'],
+                        source + ':info.exit_status,model_stats.api_calls,messages', counts)
 
 
 def validate_control(control, budget, info):

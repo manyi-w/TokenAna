@@ -37,9 +37,11 @@ python -B -m tokenAna study experiments/paper.toml --runs runs/paper-run --outpu
 
 离线 study 报告重读保存记录，输出新目录，不覆盖旧报告。PDF/SVG 使用 [分析依赖](requirements/analysis.txt)；无绘图环境时明确记录 figures=unavailable，JSON/CSV/Markdown 仍可生成。显式 --no-figures 用于仅导出表格。
 
+独立 RQ1 的四个原生 setting 入口、论文数字和缓存审计见 [RQ1 使用说明](RQ1/README.md)。turn_control 使用正式版 Gemini 2.5 Pro、29→45；四组真实运行尚未验收。
+
 ## 产物与解释
 
-- original、corrected-v1 保留原规则；corrected-v2-api 汇总实际生成 API usage，并按固定 selected 任务数计算均值。缺失字段与零分开。
+- original 保留作者规则；corrected-v2-api 是唯一完整 corrected，按固定 selected 任务数汇总实际生成 API usage；cache_only 单列缓存校正。每题提供对照 CSV、逐操作数步骤 CSV 和可复算 JSON，缺失与零分开。
 - input/output 包含关系由协议确定；cache/reasoning 子项不重复加总。本地压缩和剪枝 forward 单列，费用显示不计价。
 - 内容类别和重复历史仅作结构诊断，不新增研究 tokenizer，不从字符数估算 token。
 - 研究报告包含逐请求、逐任务、口径桥接、方法排名、节省率、配对仓库 bootstrap、Pareto、四组结果诊断及证据索引。无法隔离的统计变化保持未知。

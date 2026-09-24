@@ -131,18 +131,30 @@ class AgentDiet(SessionMethod):
         return callback
 
     def original_accounting(self, cases):
-        # exporter.ipynb includes every present trajectory, including errors and empty patches.
+        from src.accounting_trace import calc, constant, metric, expression, case_source
         report = source_metrics(cases, rule='agent-diet-exporter-compatible-v1')
         selected = [case for case in cases if case.trace is not None]
-        correction = 200_000 * sum(case.method_data.get('source_error') == 'APIStatusError' for case in selected)
+        denominator = calc('count', *(case_source(c, 'case_id', c.case_id, kind='selection') for c in selected), description='原纳入任务数')
+        errors = calc('sum', *(calc('equal', c.method_data.get('_source_error_calculation') or case_source(c, 'source_error', c.method_data.get('source_error')),
+            constant('APIStatusError', 'methods/agent_diet/adapter.py:original_accounting'), description='原错误补偿触发条件') for c in selected))
+        correction = calc('multiply', constant(200_000, 'methods/agent_diet/upstream/result/exporter.ipynb:APIStatusError', '作者错误补偿常量'),
+                          errors, description='200000 × APIStatusError 次数')
         for key in ('input', 'total'):
-            report['metrics'][key]['sum'] += correction
-            report['metrics'][key]['mean'] = report['metrics'][key]['sum'] / len(selected) if selected else None
-        incoming = sum(c.method_data.get('metrics', {}).get('analysis_prompt_tokens', 0) -
-            492 * c.method_data.get('metrics', {}).get('analysis_count', 0) for c in selected)
-        outgoing = sum(c.method_data.get('metrics', {}).get('analysis_completion_tokens', 0) for c in selected)
-        report['overhead'] = author_metrics(len(selected), {'input': incoming, 'output': outgoing,
-            'total': incoming + outgoing, 'calls': sum(c.method_data.get('metrics', {}).get('analysis_count', 0) for c in selected)},
-            'author-cache-assumption-492-per-analysis')
+            report['metrics'][key] = metric(calc('sum', expression(report['metrics'][key]), correction,
+                description='原计数加作者错误补偿'), denominator)
+        def field(c, name):
+            value = c.method_data.get('metrics', {}).get(name, 0)
+            return case_source(c, 'metrics/' + name, value,
+                kind='native_aggregate' if name in c.method_data.get('metrics', {}) else 'rule_default')
+        calls = calc('sum', *(field(c, 'analysis_count') for c in selected), description='原分析次数相加')
+        before = calc('sum', *(field(c, 'analysis_prompt_tokens') for c in selected), description='辅助输入原汇总相加')
+        assumed = calc('multiply', constant(492, 'methods/agent_diet/upstream/result/exporter.ipynb:492', '作者假设每次分析缓存 492，并非实测'),
+                       calls, description='492 × 分析次数：原假定缓存扣除量')
+        incoming = calc('subtract', before, assumed, description='辅助输入减原假定缓存')
+        outgoing = calc('sum', *(field(c, 'analysis_completion_tokens') for c in selected), description='原辅助输出相加')
+        report['overhead'] = {'rule': 'author-cache-assumption-492-per-analysis', 'cases_counted': len(selected),
+            'metrics': {key: metric(value, denominator) for key, value in dict(input=incoming, output=outgoing,
+                total=calc('sum', incoming, outgoing), calls=calls).items()}}
+        report['helper_calculation'] = dict(before=before, assumed_cache=assumed, input=incoming, output=outgoing, calls=calls)
         report['note'] += ' Author +200000 APIStatusError compensation and 492-token cache assumption are original-only; overhead shown separately.'
         return report

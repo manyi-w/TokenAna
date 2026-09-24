@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import threading
 import time
+import os
 
 from src.local_compute import observe_forwards, summary
 
@@ -13,10 +14,17 @@ SOURCE = Path(__file__).parent / 'upstream/code/attn_compress/attn_compress_serv
 def create_app():
     from fastapi import FastAPI
     from fastapi.responses import JSONResponse
-    spec = importlib.util.spec_from_file_location('tokenana_attn_original', SOURCE)
-    original = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = original
-    spec.loader.exec_module(original)
+    model_path = os.environ.get('TOKENANA_ATTN_MODEL_PATH')
+    if model_path:
+        from src.source_declarations import configured_module
+        original = configured_module(SOURCE, 'tokenana_attn_original', {
+            'ATTN_MODEL_PATH': model_path,
+            'MAX_TOKEN_FOR_MODEL': int(os.environ.get('TOKENANA_ATTN_MAX_TOKENS', '300000'))})
+    else:
+        spec = importlib.util.spec_from_file_location('tokenana_attn_original', SOURCE)
+        original = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = original
+        spec.loader.exec_module(original)
     resource = original.AttnResource.instance()
     models = [instance['model'] for instance in resource.instances]
     lock = threading.Lock()  # Original endpoint writes shared log files.
@@ -40,5 +48,7 @@ def create_app():
 
     @app.get('/health')
     def health():
-        return {'version': 'tokenana-attn-forward-v1', 'model': resource.model_path}
+        return {'version': 'tokenana-attn-forward-v1', 'model': resource.model_path,
+                'max_tokens': original.MAX_TOKEN_FOR_MODEL,
+                'deployment': original.MODEL_DEPLOYMENT_CONFIG}
     return app

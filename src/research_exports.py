@@ -1,4 +1,4 @@
-"""Versioned v2 exports, alongside unchanged original/corrected-v1 files."""
+"""Original and full v2 exports."""
 from .accounting_v2 import request_rows, restore_cases
 from .records import write_json
 
@@ -8,7 +8,7 @@ def export_v2(report, output):
     rows = []
     for section in [report, *report['cases']]:
         identity = section.get('case_id', '__all__')
-        for name, key in (('original', 'original_token_accounting'), ('corrected-v1', 'corrected_token_accounting'),
+        for name, key in (('original', 'original_token_accounting'),
                           ('corrected-v2-api', 'corrected_v2_api')):
             policy = section.get(key, {})
             for metric, value in policy.get('metrics', {}).items():
@@ -28,5 +28,5 @@ def export_v2(report, output):
         target = output / 'v2'
         target.mkdir(exist_ok=True)
         export_cost(report['corrected_v2_cost'], target)
-    bridge = report.get('policy_bridge', [])
+    bridge = [{k: v for k, v in row.items() if k != 'calculation'} for row in report.get('policy_bridge', [])]
     _csv(output / 'policy-bridge.csv', bridge, list(bridge[0]) if bridge else ['stage'])

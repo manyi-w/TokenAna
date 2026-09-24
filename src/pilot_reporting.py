@@ -3,7 +3,6 @@ from collections import defaultdict
 import fcntl
 import json
 from pathlib import Path
-import shutil
 
 from .tabular import legacy_csv as _csv, markdown as _markdown, write_text as _text
 from .cost_reporting import cost_rows, token_ratios
@@ -45,17 +44,19 @@ def _report(parent, result):
 
 
 def summarize(output, rows, reports=None):
-    records, flat_rows, requests, lines = [], [], [], []
+    records, flat_rows, requests, lines, trace_items = [], [], [], [], []
     for row in rows:
         parent = output / 'combinations' / row['id']
         result = json.loads((parent / 'result.json').read_text()) if (parent / 'result.json').exists() else {'status': 'pending'}
         report = reports[row['id']] if reports and row['id'] in reports else _report(parent, result)
+        from .accounting_trace import unavailable_trace
+        trace_items.append((row['id'], report.get('accounting_trace') or unavailable_trace(row['case'], '尚无已重建的 v2 证据')))
         record = {**row, **result, 'directory': str(parent),
                   'original': report.get('original_token_accounting'),
-                  'corrected': report.get('corrected_token_accounting'),
+                  'corrected': report.get('corrected_v2_api'),
                   'overhead': report.get('overhead'), 'timing_seconds': totals(parent),
-                  'cost_accounting': report.get('cost_accounting'),
-                  'token_ratios': token_ratios(report.get('corrected_token_accounting'))}
+                  'corrected_v2_cost': report.get('corrected_v2_cost'),
+                  'token_ratios': token_ratios(report.get('corrected_v2_api'))}
         if report.get('analysis', {}).get('output'):
             record['analysis_directory'] = report['analysis']['output']
         records.append(record)
@@ -68,7 +69,7 @@ def summarize(output, rows, reports=None):
                 flat[f'{policy}_{metric}'] = value.get('sum')
                 for key in ('mean', 'complete', 'reasons'):
                     flat[f'{policy}_{metric}_{key}'] = value.get(key)
-        cost = record['cost_accounting'] or {}
+        cost = record['corrected_v2_cost'] or {}
         for key in ('total_usd', 'known_subtotal_usd', 'mean_usd', 'complete', 'reasons'):
             flat['cost_' + key] = cost.get(key)
         for purpose, group in cost.get('groups', {}).get('purpose', {}).items():
@@ -89,24 +90,26 @@ def summarize(output, rows, reports=None):
         req, components = cost_rows(cost, {key: row[key] for key in ('id', 'method', 'agent', 'case')})
         requests.extend(req)
         lines.extend(components)
-    summaries = [{**(r['cost_accounting'] or dict(known_subtotal_usd=None, total_usd=None,
+    summaries = [{**(r['corrected_v2_cost'] or dict(known_subtotal_usd=None, total_usd=None,
                       complete=False, reasons=['cost accounting unavailable'])), 'case_id': r['id']} for r in records]
-    denominator = sum(s.get('cases_counted', 0) for s in summaries)
+    denominator = len(rows)
     overall = aggregate(summaries, denominator)
     groups = {}
     for dimension in ('model', 'agent', 'method'):
         grouped = defaultdict(list)
         for record, cost in zip(records, summaries):
             grouped[record[dimension]].append(cost)
-        groups[dimension] = {name: aggregate(values, sum(v.get('cases_counted', 0) for v in values))
+        groups[dimension] = {name: aggregate(values, len(values))
                              for name, values in grouped.items()}
     timing_note = 'Nested and overlapping spans are not additive; cost overhead is already included in total.'
-    write_json(output / 'summary.json', dict(version=2, cases=records, cost_accounting=overall,
+    write_json(output / 'summary.json', dict(version=2, cases=records, corrected_v2_cost=overall,
         cost_groups=groups, timing_note=timing_note,
-        mean_note='Pilot denominator counts called combination/case pairs, including failures.'))
+        mean_note='固定分母为选中的配置/任务组合，包含失败与尚未执行项。'))
     for name, values in (('summary', flat_rows), ('requests', requests), ('costs', lines)):
         fields = list(dict.fromkeys(key for value in values for key in value)) or ['id', 'total_usd', 'complete']
         _csv(output / (name + '.csv'), values, fields)
+    from .accounting_trace import export_trace_bundle
+    export_trace_bundle(trace_items, output)
     headline = ['model', 'agent', 'method', 'case', 'status', 'resolved', 'cost_total_usd', 'cost_known_subtotal_usd', 'cost_complete']
     token_fields = ['model', 'agent', 'method', 'case', 'corrected_input', 'corrected_output', 'corrected_total',
                     'corrected_cache_read', 'corrected_cache_miss', 'corrected_cache_write',
@@ -123,7 +126,7 @@ def print_summary(records):
     for record in records:
         metrics = (record.get('corrected') or {}).get('metrics', {})
         values = ', '.join(f"{key}={value.get('sum')}" for key, value in metrics.items())
-        cost = record.get('cost_accounting') or {}
+        cost = record.get('corrected_v2_cost') or {}
         print(f"{record['model']} / {record['agent']} / {record['method']} / {record['case']}: {values or 'usage unknown'}\n"
               f"  Cost USD={cost.get('total_usd')}; known={cost.get('known_subtotal_usd')}; complete={cost.get('complete', False)}")
 
@@ -150,15 +153,4 @@ def refresh(output, pricing=None):
             run = output / 'combinations' / row['id'] / 'run'
             if (run / 'state.json').exists():
                 reports[row['id']] = analyze_run(run, pricing=snapshot)['report']
-        index = 1
-        while True:
-            backup = output / f'summary-backup-{index:02d}'
-            try:
-                backup.mkdir()
-                break
-            except FileExistsError:
-                index += 1
-        for name in ('summary.json', 'summary.csv', 'summary.md', 'requests.csv', 'costs.csv'):
-            if (output / name).exists():
-                shutil.copy2(output / name, backup / name)
         return summarize(output, manifest['rows'], reports)

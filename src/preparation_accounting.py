@@ -34,7 +34,7 @@ def preparation_report(root, study):
             if str(directory) in evidence:
                 raise ValueError('Preparation raw API directory must not be charged twice')
             usages.append(read_raw_usage(directory, case_id=entry['id'], attempt_id='preparation',
-                                         call_id=entry['id'], forwarded_only=True))
+                                         call_id=entry['id']))
             evidence.append(str(directory))
         cost = api_cost(usages, study['pricing'])
         selected = sum(configs[c]['selected'] for c in scopes)

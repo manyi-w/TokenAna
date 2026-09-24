@@ -39,7 +39,7 @@ def load_model(section: dict, directory: Path) -> ModelConfig:
         if not isinstance(value, str) or (key not in {"base_url", "note"} and not value.strip()):
             raise ConfigError(f"model.{key} must be a string" +
                               ("" if key in {"base_url", "note"} else " and non-empty"))
-    if values["protocol"] not in {"responses", "chat_completions", "anthropic_messages"}:
+    if values["protocol"] not in {"responses", "chat_completions", "anthropic_messages", "gemini_generate_content"}:
         raise ConfigError("unsupported model.protocol")
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", values["api_key_env"]):
         raise ConfigError("model.api_key_env must be an environment variable name, not a key")

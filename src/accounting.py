@@ -34,6 +34,7 @@ class UsageObservation:
     parent_call_id: str | None = None
     operation_id: str | None = None
     billing_context: Mapping[str, Any] = field(default_factory=dict)
+    calculation: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,7 @@ class FinalSummary:
     input_tokens: int | None
     output_tokens: int | None
     source: str
+    calculation: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -95,50 +97,11 @@ def _count(value: Any, name: str) -> int | None:
 
 
 def normalize_openai_usage(raw: Mapping[str, Any]) -> dict[str, int | None]:
-    """OpenAI Responses usage; absent details remain unknown, never default zero.
-
-    Codex trace field mapping belongs to its adapter, not this API normalizer.
-    """
-    incoming = raw.get("input_tokens_details") or {}
-    outgoing = raw.get("output_tokens_details") or {}
-    if not isinstance(incoming, Mapping) or not isinstance(outgoing, Mapping):
-        raise ValueError("usage details must be objects")
-    metrics = {
-        "input": raw.get("input_tokens"), "output": raw.get("output_tokens"),
-        "cache_read": incoming.get("cached_tokens"),
-        "cache_write": incoming.get("cache_write_tokens"),
-        "reasoning": outgoing.get("reasoning_tokens"),
-    }
-    metrics = {key: _count(value, key) for key, value in metrics.items()}
-    inp, out = metrics["input"], metrics["output"]
-    metrics["total"] = inp + out if inp is not None and out is not None else None
-    reported = _count(raw.get("total_tokens"), "total_tokens")
-    if reported is not None and metrics["total"] is not None and reported != metrics["total"]:
-        raise ValueError("reported total disagrees with input + output")
-    read, write, reasoning = (metrics[key] for key in ("cache_read", "cache_write", "reasoning"))
-    if inp is not None:
-        if any(value is not None and value > inp for value in (read, write)):
-            raise ValueError("cache detail exceeds input")
-        if read is not None and write is not None:
-            if read + write > inp:
-                raise ValueError("cache read + write exceeds input")
-            metrics["ordinary_input"] = inp - read - write
-    if out is not None and reasoning is not None:
-        if reasoning > out:
-            raise ValueError("reasoning exceeds output")
-        metrics["ordinary_output"] = out - reasoning
-    for prefix, details, names in (
-        ('input', incoming, ('text_tokens', 'image_tokens', 'audio_tokens')),
-        ('output', outgoing, ('text_tokens', 'image_tokens', 'audio_tokens',
-                              'accepted_prediction_tokens', 'rejected_prediction_tokens')),
-    ):
-        for name in names:
-            if name in details:
-                metrics[f'{prefix}_{name}'] = _count(details[name], name)
-    return metrics
+    from .usage_protocols import normalize_usage
+    return normalize_usage(raw, 'responses')
 
 
-def _validated_observations(cases, *, full_evidence=False):
+def _validated_observations(cases):
     """Validate and index evidence without calculating either accounting policy."""
     if len({case.case_id for case in cases}) != len(cases):
         raise ValueError("provide one CaseUsage per case, containing all attempts")
@@ -170,58 +133,18 @@ def _validated_observations(cases, *, full_evidence=False):
                              or (previous.purpose, previous.model, previous.parent_call_id, previous.operation_id)
                              != (item.purpose, item.model, item.parent_call_id, item.operation_id)):
                 raise ValueError(f"conflicting usage identity: {identity}")
-            if full_evidence and previous and {
-                    k: v for k, v in asdict(previous).items() if k != 'source'} != {
-                    k: v for k, v in asdict(item).items() if k != 'source'}:
+            if previous and {
+                    k: v for k, v in asdict(previous).items() if k not in ('source', 'calculation')} != {
+                    k: v for k, v in asdict(item).items() if k not in ('source', 'calculation')}:
                 raise ValueError('Conflicting response evidence')
             unique.setdefault(identity, item)
     return names, by_case
 
 
-def corrected_accounting(cases: Sequence[CaseUsage]) -> dict:
-    """Sum known metrics with the original v1 called-case denominator."""
-    names, by_case = _validated_observations(cases)
-    denominator = sum(case.llm_called is True for case in cases)
-    unknown_cases = [case.case_id for case in cases if case.llm_called is None]
-    metrics = {}
-    for name in names:
-        values = []
-        reasons = []
-        for case in cases:
-            observations = by_case[case.case_id]
-            if case.llm_called is None:
-                reasons.append(f"{case.case_id}: LLM call status unknown")
-            if case.llm_called is True and not observations:
-                reasons.append(f"{case.case_id}: no usage observations")
-            if not case.coverage_complete:
-                reasons.append(f"{case.case_id}: incomplete trace coverage")
-            reasons.extend(f"{case.case_id}: {reason}" for reason in case.issues)
-            for item in observations.values():
-                value = item.metrics.get(name)
-                if value is None:
-                    reasons.append(f"{item.source}: {name} unknown")
-                else:
-                    values.append(value)
-                if name in item.issues:
-                    reasons.append(f"{item.source}: {item.issues[name]}")
-        known_sum = sum(values) if values else (0 if not denominator and not reasons else None)
-        metrics[name] = {
-            "sum": known_sum,
-            "mean": known_sum / denominator if known_sum is not None and denominator else None,
-            "complete": not reasons,
-            "reasons": list(dict.fromkeys(reasons)),
-        }
-    return {
-        "rule": "corrected-v1", "cases_counted": denominator,
-        "cases_selected": len(cases), "unknown_call_cases": unknown_cases,
-        "metrics": metrics,
-    }
-
-
 def render_accounting(report: Mapping[str, Any]) -> str:
     """Render every metric, including unknown and additional metrics."""
     original, corrected = (report[key] for key in
-                           ("original_token_accounting", "corrected_token_accounting"))
+                           ("original_token_accounting", "corrected_v2_api"))
     names = list(dict.fromkeys([*METRICS, *original["metrics"], *corrected["metrics"]]))
     lines = ["Metric | original token accounting | corrected token accounting",
              f"Cases counted | {original['cases_counted']} | {corrected['cases_counted']}"]
@@ -250,5 +173,5 @@ def render_accounting(report: Mapping[str, Any]) -> str:
         from .overhead import render_overhead
         lines.append(render_overhead(report["overhead"]))
     from .pricing import render_cost
-    lines.append(render_cost(report.get('cost_accounting')))
+    lines.append(render_cost(report.get('corrected_v2_cost')))
     return "\n".join(lines)

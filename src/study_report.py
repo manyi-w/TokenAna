@@ -51,6 +51,7 @@ def read_case(row, root, tasks, report=None):
         cost_usd=float(cost['total_usd']) if cost.get('complete') and cost.get('total_usd') is not None else None,
         seconds=timing.get('seconds') if timing.get('complete') else None,
         original_tokens=original_total.get('sum') if original_total.get('complete') else None,
+        cache_only_tokens=(detail.get('cache_only', {}).get('total') or {}).get('sum'),
         original_denominator=original.get('cases_counted'), original_rule=original.get('rule'),
         token_reasons=tokens.get('reasons', []), cost_reasons=cost.get('reasons', []),
         local_compute=detail.get('local_compute', []), timing=report.get('timing'))
@@ -81,6 +82,7 @@ def read_case(row, root, tasks, report=None):
 
 
 def aggregate(study, records):
+    from .accounting_trace import atom, calc, constant, number, missing
     indexed = defaultdict(list)
     for record in records:
         indexed[record['configuration_id']].append(record)
@@ -93,12 +95,15 @@ def aggregate(study, records):
                  'evaluated': sum(r['evaluated'] for r in rows),
                  'resolved': sum(r['resolved'] is True for r in rows),
                  'resolution_complete': len(rows) == count and all(r['resolved'] is not None for r in rows)}
+        denominator = atom(count, 'pilot.json', '/study/configurations/id=' + config['id'] + '/selected',
+                           kind='selection', description='冻结配置选中任务数')
+        entry['calculation'] = {}
         entry['comparison_issues'] = list(dict.fromkeys(issue for r in rows for issue in r.get('comparison_issues', [])))
         entry['comparable'] = not entry['comparison_issues']
         entry['resolved_rate'] = entry['resolved'] / count if entry['resolution_complete'] else None
         triggers = [r['method_triggered'] for r in rows]
         entry['trigger_rate'] = sum(v is True for v in triggers) / count if all(v is not None for v in triggers) else None
-        for metric in (*METRICS, 'original_tokens', 'no_cache_cost_usd'):
+        for metric in (*METRICS, 'original_tokens', 'cache_only_tokens', 'no_cache_cost_usd'):
             known = [r.get(metric) for r in rows if r.get(metric) is not None]
             complete = len(known) == count
             entry[metric] = sum(known) if complete else None
@@ -106,6 +111,21 @@ def aggregate(study, records):
             entry[metric + '_complete'] = complete
             entry[metric + '_mean'] = sum(known) / count if complete else None
             entry[metric + '_missing'] = [r['case'] for r in rows if r.get(metric) is None]
+            if metric != 'seconds':
+                fields = {'tokens': '/corrected_v2_api/metrics/total/sum',
+                          'original_tokens': '/original_token_accounting/metrics/total/sum',
+                          'cache_only_tokens': '/cache_only/total/sum',
+                          'cost_usd': '/corrected_v2_cost/total_usd',
+                          'no_cache_cost_usd': '/corrected_v2_cost/no_cache_discount/total_usd'}
+                terms = [atom(r[metric], r.get('reconstructed') or r['evidence'] + '/accounting.json',
+                              '/cases/case_id=' + r['case'] + fields[metric],
+                              description='引用逐题已重建结果；费用研究投影保留 float 数值')
+                         for r in rows if r.get(metric) is not None]
+                subtotal = calc('sum', *terms, description='配置内逐题已知贡献相加') if terms else missing('无已知题目贡献')
+                total = calc('guard', subtotal, constant(complete, 'src/study_report.py:aggregate', '固定选中任务逐项完整性'))
+                mean = calc('divide', total, denominator, description='配置总量除以固定任务数')
+                entry.update({metric: number(total), metric + '_known_subtotal': number(subtotal), metric + '_mean': number(mean)})
+                entry['calculation'][metric] = dict(sum=total, known_subtotal=subtotal, mean=mean)
         result.append(entry)
     by_id = {r['id']: r for r in result}
     for entry in result:
@@ -197,6 +217,7 @@ def build_report(study, rows, root, output, *, jobs=4, figures=True):
     from .accounting_v2 import request_rows, restore_cases
     from .research_diagnostics import enrich_report
     records, details, context, bridges, errors, times, execution_order = [], [], [], [], [], [], []
+    trace_refs = []
     content_totals = Counter()
     context_cases = set()
     evidence = output / 'reconstructed'
@@ -251,7 +272,8 @@ def build_report(study, rows, root, output, *, jobs=4, figures=True):
                 record['reconstructed'] = str(evidence / row['id'] / 'accounting.json')
                 usage = restore_cases([d['api_usage'] for d in report['cases']])
                 append_csv(output / 'requests.csv', [{**r, 'configuration_id': row['configuration_id']} for r in request_rows(usage)])
-                append_csv(output / 'policy-bridge-cases.csv', [{**b, 'configuration_id': row['configuration_id'], 'case_id': row['case']} for b in report.get('policy_bridge', [])])
+                append_csv(output / 'policy-bridge-cases.csv', [{**{k: v for k, v in b.items() if k != 'calculation'}, 'configuration_id': row['configuration_id'], 'case_id': row['case']} for b in report.get('policy_bridge', [])])
+            trace_refs.append((row['id'], record.get('reconstructed'), row['case'], error))
             if diagnostic:
                 for filename, key in (('content-structure', 'segments'), ('context-by-request', 'requests'), ('review-samples', 'review_samples'), ('method-changes', 'method_changes')):
                     values = [{**r, 'configuration_id': row['configuration_id'], 'case_id': row['case']} for r in diagnostic[key]]
@@ -279,7 +301,7 @@ def build_report(study, rows, root, output, *, jobs=4, figures=True):
     totals = aggregate(study, records)
     ranks, intervals, frontier = comparisons(study, totals, records)
     pairs, macro = diagnostics(totals, records)
-    result = dict(version=1, status='offline_report', selected=len(rows), aggregates=totals,
+    result = dict(version=2, status='offline_report', selected=len(rows), aggregates=totals,
                   rankings=ranks, bootstrap=intervals, pareto=frontier, macro=macro,
                   notes=['Fixed selected denominator; missing values are not zero.',
                          'Verified has no paper baseline; savings and rankings come from DeepSWE.',
@@ -297,6 +319,32 @@ def build_report(study, rows, root, output, *, jobs=4, figures=True):
     write_json(output / 'research.json', result)
     for name, values in (('cases', records), ('aggregates', totals), ('rankings', ranks), ('paired-diagnostics', pairs), ('macro', macro)):
         csv_file(output / (name + '.csv'), values)
+    from .accounting_trace import export_trace_bundle, unavailable_trace, Trace, missing
+    def trace_items():
+        for identity, path, case, error in trace_refs:
+            value = json.loads(Path(path).read_text()).get('accounting_trace') if path else None
+            yield identity, value or unavailable_trace(case, error or '选中任务尚无已重建的统计证据')
+        for entry in totals:
+            trace = Trace()
+            values = entry['calculation']
+            trace.compare(values['original_tokens']['sum'], values['cache_only_tokens']['sum'], values['tokens']['sum'],
+                          case_id='__all__', method=entry['method'], model=entry['model'], scope='reported', metric='total',
+                          reason='配置内逐题贡献汇总；同名任务按配置分开，未知不填零。')
+            trace.compare(missing('通用 original 未定义作者费用'), missing('缺少同范围作者价表'), values['cost_usd']['sum'],
+                          case_id='__all__', method=entry['method'], model=entry['model'], scope='all', metric='cost_usd',
+                          reason='配置内逐题费用汇总。')
+            for metric, nodes in values.items():
+                for key, node in nodes.items():
+                    trace.add(node, case_id='__all__', method=entry['method'], model=entry['model'], scope='aggregate', policy=metric, metric=key)
+            for step in trace.steps:
+                if step.get('source') == 'pilot.json':
+                    step['source'] = str(manifest_path)
+            indexed = {s['step_id']: s for s in trace.steps}
+            for step in trace.steps:
+                for operand in step['operands']:
+                    operand['source'] = indexed[operand['step_id']].get('source')
+            yield entry['id'] + '/aggregate', trace.payload()
+    export_trace_bundle(trace_items(), output)
     write_json(output / 'cases.json', records)
     write_json(output / 'evidence.json', details)
     csv_file(output / 'reconstruction-errors.csv', errors)
@@ -306,7 +354,7 @@ def build_report(study, rows, root, output, *, jobs=4, figures=True):
     for name, values in result['diagnostics'].items():
         if isinstance(values, list):
             filename = 'traceable-cases' if name == 'cases' else name.replace('_', '-')
-            csv_file(output / (filename + '.csv'), values)
+            csv_file(output / (filename + '.csv'), [{k: v for k, v in r.items() if k != 'calculation'} for r in values] if name == 'policy_bridge' else values)
     write_json(output / 'classification-rules.json', RULES)
     write_json(output / 'diagnostics.json', result['diagnostics'])
     if figures:

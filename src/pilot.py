@@ -657,7 +657,7 @@ def _main(argv, stack):
     failures = run_matrix(output, rows, manifest, settings, credentials, prices,
                           jobs=args.jobs, resume=bool(args.resume))
     summary = json.loads((output / 'summary.json').read_text())
-    cost = summary['cost_accounting']
+    cost = summary['corrected_v2_cost']
     print_summary(summary['cases'])
     print(f"Estimated cost USD: {cost['total_usd']}; known subtotal: {cost['known_subtotal_usd']}; complete={cost['complete']}")
     print(f'Results: {output / "summary.md"}\nResume: bash scripts/run-experiments.sh --resume {shlex.quote(str(output))}')

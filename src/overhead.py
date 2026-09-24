@@ -4,7 +4,7 @@ from dataclasses import asdict
 import math
 from typing import Mapping
 
-from .accounting import METRICS, corrected_accounting
+from .accounting import METRICS
 
 PURPOSES = ('main', 'agent_auxiliary', 'method_auxiliary', 'compression_service', 'unknown')
 GROUPS = {**{p: {p} for p in PURPOSES},
@@ -36,13 +36,15 @@ def duration(metadata):
 
 def _metric(values, denominator, reasons):
     known = sum(values) if values else (None if reasons else 0)
-    return {'sum': known, 'mean': known / denominator if known is not None and denominator else None,
+    total = known if not reasons else None
+    return {'sum': total, 'known_subtotal': known, 'mean': total / denominator if total is not None and denominator else None,
             'complete': not reasons, 'reasons': list(dict.fromkeys(reasons))}
 
 
-def overhead_accounting(cases, author=None):
+def overhead_accounting(cases, author=None, *, local_operations=()):
     # Reuse all token validation, including conflicting identities and total semantics.
-    total = corrected_accounting(cases)
+    from .accounting_v2 import corrected_v2
+    total = corrected_v2(cases)
     denominator = total['cases_counted']
     observations, operations = {}, {}
     gaps = []
@@ -55,7 +57,7 @@ def overhead_accounting(cases, author=None):
         for op in case.operations:
             if op.case_id != case.case_id or not all((op.attempt_id, op.call_id, op.operation_id)):
                 raise ValueError('invalid operation identity')
-            if op.purpose not in PURPOSES or op.kind not in ('llm', 'service'):
+            if op.purpose not in PURPOSES or op.kind not in ('llm', 'service', 'prepared'):
                 raise ValueError('invalid operation purpose or kind')
             if op.duration_sec is not None and duration({'duration_sec': op.duration_sec}) is None:
                 raise ValueError('invalid operation duration')
@@ -65,24 +67,32 @@ def overhead_accounting(cases, author=None):
             operations[key] = op
         if case.llm_called is True and not case.operations:
             gaps.append(f'{case.case_id}: operation records unavailable')
+    for op in local_operations:
+        if op.purpose != 'compression_service':
+            raise ValueError('local overhead operation must belong to compression_service')
+        key = (op.case_id, op.attempt_id, op.call_id, op.operation_id)
+        if key in operations and operations[key] != op:
+            raise ValueError('conflicting local operation evidence')
+        operations[key] = op
     for item in observations.values():
         if item.purpose not in PURPOSES:
             raise ValueError('invalid observation purpose')
         op = operations.get((item.case_id, item.attempt_id, item.call_id, item.operation_id))
         if op and (item.purpose, item.model, item.parent_call_id) != (op.purpose, op.model, op.parent_call_id):
             raise ValueError('usage and operation attribution disagree')
-    unclassified = any(i.purpose == 'unknown' for i in [*observations.values(), *operations.values()])
+    unclassified = any(i.purpose == 'unknown' for i in [*observations.values(), *(o for o in operations.values() if o.inference)])
     groups = {}
     names = list(total['metrics'])
     for group, purposes in GROUPS.items():
         selected = [i for i in observations.values() if i.purpose in purposes]
-        ops = [i for i in operations.values() if i.purpose in purposes]
+        ops = [i for i in operations.values() if i.purpose in purposes and i.inference]
         reasons = list(gaps)
         if unclassified and group not in ('all', 'unknown'):
             reasons.append('unclassified requests may belong to this group')
         metrics = {}
         for name in names:
-            missing = [f'{i.source}: {name} unknown' for i in selected if i.metrics.get(name) is None]
+            missing = ['本地 forward 不属于生成 API token；见 local_compute'] if group == 'compression_service' and ops else []
+            missing += [f'{i.source}: {name} unknown' for i in selected if i.metrics.get(name) is None]
             missing += [f'{i.source}: {i.issues[name]}' for i in selected if name in i.issues]
             # An HTTP failure with no usage must not appear as zero consumption.
             linked = {(i.case_id, i.attempt_id, i.call_id, i.operation_id) for i in selected}
@@ -102,7 +112,7 @@ def overhead_accounting(cases, author=None):
     unknown = {'rule': None, 'cases_counted': None, 'metrics': {
         name: _metric([], 0, ['author overhead not provided by this method'])
         for name in (*METRICS, 'calls', 'service_seconds')}}
-    return {'rule': 'overhead-v1', 'cases_counted': denominator,
+    return {'rule': 'overhead-v2', 'cases_counted': denominator,
             'original': author if author is not None else unknown,
             'corrected': groups,
             'operations': [asdict(op) for op in operations.values()],
