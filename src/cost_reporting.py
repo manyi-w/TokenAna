@@ -25,7 +25,7 @@ def cost_rows(cost, identity=None):
         row.update(request_complete=request['complete'], request_reasons=request['reasons'])
         requests.append({**row, **{'tokens_' + k: v for k, v in request['metrics'].items()},
                          'raw_usage': request['raw_usage']})
-        lines.extend({**row, **line} for line in request['line_items'])
+        lines.extend({**row, **{k: v for k, v in line.items() if k != 'calculation'}} for line in request['line_items'])
     return requests, lines
 
 
@@ -50,10 +50,10 @@ def cost_markdown(cost):
 
 
 def compare_costs(reports, case_maps):
-    base = reports[0].get('cost_accounting')
+    base = reports[0].get('corrected_v2_cost')
     rows = []
     for index, report in enumerate(reports):
-        cost = report.get('cost_accounting')
+        cost = report.get('corrected_v2_cost')
         reasons = []
         if not cost or not base:
             reasons.append('legacy report without cost accounting')
@@ -64,10 +64,6 @@ def compare_costs(reports, case_maps):
                 reasons.append('cost incomplete')
         if set(case_maps[index]) != set(case_maps[0]):
             reasons.append('selected task sets differ')
-        def counted(r):
-            return {c['case_id'] for c in r['cases'] if c.get('corrected_usage', {}).get('llm_called') is True}
-        if counted(report) != counted(reports[0]):
-            reasons.append('counted case sets differ')
         if any(r['run_status'] != 'submission_prepared' for r in (report, reports[0])):
             reasons.append('generation is not complete in both runs')
         value, reference = (cost or {}).get('total_usd'), (base or {}).get('total_usd')

@@ -10,7 +10,7 @@ import time
 
 from src.accounting import OriginalCase
 from src.components import ConfigError
-from src.raw_usage import read_case_usage, read_case_usage_views
+from src.raw_usage import read_case_usage
 from src.interfaces import AgentResult
 from src.agent_artifacts import collect_agent_patch, check_session_outcome, save_patch_eligibility
 from src.workspaces import execution_timeout
@@ -26,7 +26,6 @@ _SDKS = {("openai", "responses"): "@ai-sdk/openai",
 
 class OpenCode:
     read_case_usage = staticmethod(read_case_usage)
-    read_case_usage_views = staticmethod(read_case_usage_views)
 
     capabilities = ("turn_control",)
     control_runtime = "plugin"
@@ -278,12 +277,13 @@ def _config(options, endpoint):
 
 def _events(path):
     events = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line_index, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
             continue
         event = json.loads(line)
         if not isinstance(event, dict):
             raise ValueError("invalid OpenCode event")
+        event["_source"] = dict(source=str(path), locator=f"line:{line_index}")
         events.append(event)
     return events
 
@@ -296,7 +296,8 @@ def _original_events(events):
 
 
 def _parse_original_events(events):
-    unique = {}
+    from src.accounting_trace import atom, calc
+    unique, calculations = {}, {}
     for event in events:
         if event.get("type") != "step_finish":
             continue
@@ -308,9 +309,14 @@ def _parse_original_events(events):
                   tokens["cache"]["read"], tokens["cache"]["write"]]
         if any(type(value) is not int or value < 0 for value in values):
             raise ValueError("invalid OpenCode token counts")
-        counts = {"input_tokens": values[0] + values[3] + values[4],
-                  "output_tokens": values[1] + values[2]}
+        ref = event.get('_source', {})
+        operands = [atom(value, ref.get('source', 'trace.jsonl'), ref.get('locator', 'step_finish') + '/part/tokens/' + key,
+                         description='OpenCode 原生字段') for value, key in zip(values, ('input', 'output', 'reasoning', 'cache/read', 'cache/write'))]
+        calculation = dict(input_tokens=calc('sum', operands[0], operands[3], operands[4], description='原普通输入 + 缓存读 + 缓存写'),
+                           output_tokens=calc('sum', operands[1], operands[2], description='原普通输出 + reasoning'))
+        counts = {k: v['value'] for k, v in calculation.items()}
         if identity in unique and unique[identity] != counts:
             raise ValueError("conflicting OpenCode step usage")
         unique[identity] = counts
-    return [{"type": "turn.completed", "usage": counts} for counts in unique.values()]
+        calculations[identity] = calculation
+    return [{"type": "turn.completed", "usage": counts, "_calculation": calculations[key]} for key, counts in unique.items()]

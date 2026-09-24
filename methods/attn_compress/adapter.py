@@ -132,8 +132,16 @@ class AttnCompress(SessionMethod):
         report['overhead'] = author_metrics(len(selected), {'input': 0, 'output': 0, 'total': 0,
             'service_seconds': sum(c.method_data.get('metrics', {}).get('analysis_time', 0) for c in selected)},
             'author-analysis-counters-attn-zero-not-inference')
-        cached = sum(c.method_data.get('metrics', {}).get('cached_tokens', 0) for c in selected)
-        report['metrics']['cache_read'] = {'sum': cached, 'mean': cached / len(selected) if selected else None,
-            'complete': True, 'reasons': []}
+        from src.accounting_trace import calc, metric, case_source, constant
+        cached = calc('sum', *(case_source(c, 'metrics/cached_tokens', c.method_data.get('metrics', {}).get('cached_tokens', 0),
+            kind='author_estimate' if 'cached_tokens' in c.method_data.get('metrics', {}) else 'rule_default',
+            description='原 common-prefix 字符/4 缓存估计，不是 API 实测') for c in selected))
+        denominator = calc('count', *(case_source(c, 'case_id', c.case_id, kind='selection') for c in selected))
+        for key in ('input', 'output', 'total'):
+            zero = constant(0, 'methods/attn_compress/adapter.py:original_accounting',
+                            '原 attn 分支不递增分析模型计数，规则默认零，不是实测 forward usage')
+            zero['evidence_kind'] = 'rule_default'
+            report['overhead']['metrics'][key] = metric(zero, denominator)
+        report['metrics']['cache_read'] = metric(cached, denominator)
         report['note'] += ' Original cache_read is the author common-prefix-character / 4 estimate over observed model boundaries; corrected uses service usage only.'
         return report

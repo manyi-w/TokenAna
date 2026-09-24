@@ -100,7 +100,8 @@ def _root_rollout(directory, thread_id):
             candidates.append(path)
     if len(candidates) != 1:
         raise ValueError("no unique native root rollout (compressed/missing history is unsupported)")
-    return read_jsonl(candidates[0])
+    return [{**r, "_source": {"source": str(candidates[0]), "locator": f"line:{i}"}}
+            for i, r in enumerate(read_jsonl(candidates[0]), 1)]
 
 
 def load_outcome(directory, budget=None):
@@ -156,8 +157,9 @@ def load_outcome(directory, budget=None):
 
 
 def final_summary(directory):
+    from src.accounting_trace import atom, calc, constant
     control, trace, rollout, finished, calls = load_outcome(directory)
-    records = {}
+    records, sources, calculations = {}, {}, {}
     for row in rollout:
         if row.get("type") != "token_usage_record":
             continue
@@ -169,6 +171,7 @@ def final_summary(directory):
         if key in records and records[key] != value:
             raise ValueError("conflicting native usage record")
         records[key] = value
+        sources[key] = row["_source"]
     updates = [r["payload"].get("info") for r in rollout if r.get("type") == "event_msg"
                and r["payload"].get("type") == "token_count" and r["payload"].get("info") is not None]
     total = updates[-1].get("total_token_usage", {}) if updates else {}
@@ -185,6 +188,9 @@ def final_summary(directory):
             return None
         if completed and completed[0].get("usage", {}).get(name) != value:
             return None
-        return value
+        node = calc('sum', *(atom(r.get('usage', {}).get(name), sources[key]['source'], sources[key]['locator'] + '/payload/usage/' + name,
+            description='原生按 response_id 去重的 usage') for key, r in records.items()), description='原生 usage 逐响应求和，已核对累计摘要与控制记录')
+        calculations[name.removesuffix('_tokens')] = node
+        return node['value']
     return FinalSummary(finished, calls, token("input_tokens"), token("output_tokens"),
-                        "codex-native-summary-v1: trace.jsonl + root rollout + control-events.jsonl")
+                        "codex-native-summary-v1: trace.jsonl + root rollout + control-events.jsonl", calculations)

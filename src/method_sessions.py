@@ -92,18 +92,20 @@ def chat_steps(history):
 
 
 def source_metrics(cases, *, rule, patch_filter=False, author_overhead=None):
+    from .accounting_trace import calc, metric, event_source, case_source
     selected = [c for c in cases if c.trace is not None and (not patch_filter or (c.patch and c.patch.strip()))]
-    totals = {'input': 0, 'output': 0}
-    for case in selected:
-        for event in case.trace:
-            if event.get('type') == 'turn.completed':
-                totals['input'] += event.get('usage', {}).get('input_tokens', 0)
-                totals['output'] += event.get('usage', {}).get('output_tokens', 0)
-    totals['total'] = sum(totals.values())
-    count = len(selected)
-    report = {'rule': rule, 'cases_counted': count, 'metrics': {
-        key: {'sum': value, 'mean': value / count if count else None, 'complete': True, 'reasons': []}
-        for key, value in totals.items()},
+    denominator = calc('count', *(case_source(c, 'case_id', c.case_id, kind='selection') for c in selected),
+                       description='符合 original 筛选的任务数')
+    nodes = {}
+    for key in ('input', 'output'):
+        nodes[key] = calc('sum', *(event_source(case, index, event, key + '_tokens')
+            for case in selected for index, event in enumerate(case.trace) if event.get('type') == 'turn.completed'),
+            description='按原规则逐项累加原生 token', rule='src/method_sessions.py:source_metrics')
+    nodes['total'] = calc('sum', nodes['input'], nodes['output'], description='原 input + output')
+    report = {'rule': rule, 'cases_counted': len(selected), 'metrics': {
+        key: metric(value, denominator) for key, value in nodes.items()},
+        'selection': [dict(case_id=c.case_id, included=c in selected,
+            reason='轨迹存在且满足原补丁筛选' if c in selected else '缺少轨迹或不符合原补丁筛选') for c in cases],
         'note': 'Source-compatible native usage projection; original policy is separate from all-attempt raw usage.'}
     if author_overhead is not None:
         report['overhead'] = author_overhead

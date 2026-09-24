@@ -38,7 +38,7 @@ def _events(body: bytes, content_type: str):
         raise decoding_error
 
 
-def _request_usage(path, *, case_id, attempt_id, call_id, forwarded_only=False, metadata=None):
+def _request_usage(path, *, case_id, attempt_id, call_id):
     observations, operations, issues = [], [], []
     call_seen = False
     response_records = {}
@@ -47,19 +47,19 @@ def _request_usage(path, *, case_id, attempt_id, call_id, forwarded_only=False, 
     provider = None
     meta = {}
     try:
-        meta = json.loads(path.read_text()) if metadata is None else metadata
+        meta = json.loads(path.read_text())
         if not isinstance(meta, dict):
             raise ValueError("metadata must be an object")
         protocol = meta.get("protocol", "responses")
         provider = meta.get("provider")
-        if forwarded_only and (meta.get('rejected') or
+        if (meta.get('rejected') or
                 ('forwarded_at' in meta and meta['forwarded_at'] is None)):
             attr = meta.get('attribution') or {}
             operations.append(UsageOperation(case_id, attempt_id, call_id, path.parent.name,
                 purpose=attr.get('purpose', 'unknown'), model=meta.get('model'),
                 kind='prepared', inference=False, complete=True,
                 billing_context={'started_at': meta.get('started_at'), 'forwarded_at': None, 'metadata_source': str(path)}))
-            return CaseUsage(case_id, False, operations=operations), meta
+            return CaseUsage(case_id, False, operations=operations)
         if meta.get("rejected"):
             raise ValueError("request rejected by recorder")
         call_seen = True
@@ -109,66 +109,56 @@ def _request_usage(path, *, case_id, attempt_id, call_id, forwarded_only=False, 
                       complete=bool(isinstance(meta, dict) and meta.get("response_complete")),
                       issues=operation_issues, billing_context=context))
     for response_id, raw in response_records.items():
-        metric_issues = {}
+        metric_issues, calculation = {}, {}
         try:
             if raw is None:
                 raise ValueError("conflicting terminal usage")
-            metrics = normalize_usage(raw, protocol, provider)
+            metrics = normalize_usage(raw, protocol, provider, calculation=calculation,
+                source=str(path.with_name("response.body")), locators=events.field_sources.get(response_id, {}))
             if provider == 'dashscope':
                 mode = context.get('cache_control_observed')
                 if type(mode) is bool:
-                    metrics['cache_read_explicit' if mode else 'cache_read_implicit'] = metrics.get('cache_read')
+                    key = 'cache_read_explicit' if mode else 'cache_read_implicit'
+                    metrics[key] = metrics.get('cache_read')
+                    calculation[key] = calculation['cache_read']
         except (ValueError, TypeError, AttributeError) as error:
             metrics = dict.fromkeys(METRICS)
             metric_issues = dict.fromkeys(METRICS, str(error))
         observations.append(UsageObservation(
             case_id, attempt_id, call_id, f"{path.parent.name}/{response_id}",
             metrics, str(path.with_name("response.body")), raw or {}, metric_issues,
-            purpose, model, parent, path.parent.name, context))
-    called = True if call_seen else False if forwarded_only and not issues else None
-    return CaseUsage(case_id, called, observations, not issues, issues, operations), meta
+            purpose, model, parent, path.parent.name, context, calculation))
+    called = True if call_seen else False if not issues else None
+    return CaseUsage(case_id, called, observations, not issues, issues, operations)
 
 
 def _paths(directory):
     return [entry / 'metadata.json' for entry in sorted(Path(directory).glob('*')) if entry.is_dir()]
 
 
-def _combine_requests(case_id, pieces, *, forwarded_only=False):
+def _combine_requests(case_id, pieces):
     if not pieces:
         return CaseUsage(case_id, None, coverage_complete=False,
                          issues=('no recorded API request; call status unknown',))
     issues = [reason for piece in pieces for reason in piece.issues]
-    called = True if any(p.llm_called is True for p in pieces) else False if forwarded_only and not issues else None
+    called = True if any(p.llm_called is True for p in pieces) else False if not issues else None
     return CaseUsage(case_id, called, [o for p in pieces for o in p.observations], not issues,
                      issues, [o for p in pieces for o in p.operations])
 
 
 def read_raw_usage(directory: Path, *, case_id: str, attempt_id: str,
-                   call_id: str, forwarded_only: bool = False) -> CaseUsage:
+                   call_id: str) -> CaseUsage:
     """Read each HTTP attempt once; cumulative stream snapshots are not added."""
-    pieces = [_request_usage(path, case_id=case_id, attempt_id=attempt_id, call_id=call_id,
-                             forwarded_only=forwarded_only)[0] for path in _paths(directory)]
-    return _combine_requests(case_id, pieces, forwarded_only=forwarded_only)
-
-
-def read_usage_views(directory, *, case_id, attempt_id, call_id):
-    """Decode shared evidence once, retaining both legacy and forwarded-only policy."""
-    legacy, forwarded = [], []
-    for path in _paths(directory):
-        full, meta = _request_usage(path, case_id=case_id, attempt_id=attempt_id, call_id=call_id)
-        legacy.append(full)
-        if meta.get('rejected') or ('forwarded_at' in meta and meta['forwarded_at'] is None):
-            # Prepared requests have different coverage semantics in v1 and v2.
-            full, _ = _request_usage(path, case_id=case_id, attempt_id=attempt_id,
-                                     call_id=call_id, forwarded_only=True, metadata=meta)
-        forwarded.append(full)
-    return (_combine_requests(case_id, legacy),
-            _combine_requests(case_id, forwarded, forwarded_only=True))
+    pieces = [_request_usage(path, case_id=case_id, attempt_id=attempt_id, call_id=call_id) for path in _paths(directory)]
+    if not pieces:
+        try:
+            session = json.loads((Path(directory) / 'session.json').read_text())
+            if session.get('closed') is True:
+                return CaseUsage(case_id, False)
+        except (OSError, ValueError):
+            pass
+    return _combine_requests(case_id, pieces)
 
 
 def read_case_usage(directory, **identity):
     return read_raw_usage(directory / 'api-records', **identity)
-
-
-def read_case_usage_views(directory, **identity):
-    return read_usage_views(directory / 'api-records', **identity)

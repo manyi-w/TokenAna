@@ -45,6 +45,18 @@ python -B -m tokenAna study experiments/paper.toml --runs runs/paper-run --outpu
 
 默认尝试生成 PDF/SVG。准备过 matplotlib 的分析环境可直接运行；--no-figures 明确只导表。可选择 scripts/analysis.Dockerfile 构建独立分析镜像，宿主无需安装；构建本身需要操作者授权与网络。映射源运行目录时须保持保存路径可访问，输出目录单独可写。
 
+## 逐题查看计算过程
+
+RQ1 四组生成/评测入口及环境准备见 [RQ1 使用说明](../RQ1/README.md)；`bash RQ1/replay.sh` 仅复算历史归档；通用运行用上面的 analyze 或 study 离线入口。所有入口生成：
+
+- `accounting-comparison.csv`：筛选 case_id（study 另选 configuration_id）、scope 和 metric，查看 original、cache_only、corrected_v2 及三项差额；known_subtotal 是证据不完整时的已知小计。
+- `accounting-steps.csv`：通过对照行的 original_step、cache_only_step、corrected_v2_step 查找 step_id，再沿 operand_step_id 查看每个加数、扣除项、价格和分母的来源。formula 直接展示代入数值。
+- `accounting-trace.json`：相同计算的完整依赖图，可按运算和操作数重算。共享节点只计算一次，CSV 的操作数行不能再次直接求总和。
+
+source 指向原文件或 archive::member，locator 指向字段、JSONL 行、SSE 事件或作者代码/notebook 单元。null 是缺证据或原规则未定义，rule_default 的零是原算法默认值。通用 original 未定义作者费用时保持未知。
+
+通用统计 schema_version=2；不再读取或计算旧 corrected。旧格式须用原始记录离线重建。此次迁移已授权清理旧派生报告；平时 analyze 仍写入新目录，不改写原始轨迹、配置、价格和评测。
+
 ## 证据与工作区恢复
 
 新运行默认 retention_mode=research：保存最终 /app 或 /testbed、/logs 的压缩增量，保留已提交/未提交修改、新文件与 Git 元数据；删除路径在 retention.json，基础镜像记录 image_id 和 tokenana-retained 标签。已保存挂载不重复归档，其他可写卷单列。迁移 Docker 前集中保存所需基础镜像。
@@ -53,7 +65,7 @@ python -B -m tokenAna study experiments/paper.toml --runs runs/paper-run --outpu
 
 请求/响应、原生轨迹、方法前后快照、模型配置、价格、补丁和评测记录均保留。归档验证失败时容器保留；查看 retention.json、controller.json、channel-volumes.jsonl，不擅自清理尚未确认完整的证据。
 
-本次清理已按用户要求删除全部旧 runs/ 输出，包括中断试跑快照。请启动新实验，运行器会重新创建输出目录；--resume 和离线重建仅适用于以后新生成且仍保留的结果目录。源码、配置、任务数据和评测器不受影响。
+此前旧试跑清理不影响后来新生成的运行。本次统计迁移保留现有运行的原始证据；--resume 和离线重建仍适用于这些完整保存的目录。
 
 ## 运行前检查
 

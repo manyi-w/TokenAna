@@ -10,7 +10,7 @@ import time
 
 from src.accounting import OriginalCase
 from src.components import ConfigError
-from src.raw_usage import read_case_usage, read_case_usage_views
+from src.raw_usage import read_case_usage
 from src.interfaces import AgentResult
 from src.agent_artifacts import collect_agent_patch, check_session_outcome, save_patch_eligibility
 from src.workspaces import execution_timeout
@@ -18,17 +18,16 @@ from src.workspaces import execution_timeout
 
 SUPPORTED_MODELS = {("openai", "responses"), ("openai", "chat_completions"), ("anthropic", "anthropic_messages"),
                     ("deepseek", "chat_completions"), ("dashscope", "chat_completions"),
-                    ("dashscope", "responses")}
+                    ("dashscope", "responses"), ("google", "gemini_generate_content")}
 
 
 class Trae:
     read_case_usage = staticmethod(read_case_usage)
-    read_case_usage_views = staticmethod(read_case_usage_views)
 
     capabilities = ("turn_control",)
     session_capabilities = ("events", "replace_history", "state", "reminder", "terminate")
     session_version = "trae-session-compatible-v1"
-    model_protocols = ("responses", "anthropic_messages", "chat_completions")
+    model_protocols = ("responses", "anthropic_messages", "chat_completions", "gemini_generate_content")
     raw_usage_protocols = model_protocols
     explicit_cache_protocols = ("anthropic_messages",)
     original_compatible_trace_formats = ("codex-jsonl", "agent-final-summary-v1")
@@ -72,6 +71,10 @@ class Trae:
         if path.exists():
             trajectory = _trajectory(path)
             trace = _original_events(trajectory)
+            indices = [i for i, item in enumerate(trajectory['llm_interactions'])
+                       if isinstance(item.get('response'), dict) and isinstance(item['response'].get('usage'), dict)]
+            for index, event in zip(indices, trace):
+                event['_source'] = dict(source=str(path), locator=f'/llm_interactions/{index}/response')
             summary = FinalSummary(bool(trajectory.get("end_time")),
                                    sum(len(step.get("tool_calls") or []) for step in trajectory["agent_steps"]),
                                    sum(event["usage"]["input_tokens"] for event in trace),
@@ -86,18 +89,23 @@ class Trae:
         interactions, steps = trajectory["llm_interactions"], trajectory["agent_steps"]
         calls = [step.get("tool_calls") or [] for step in steps]
         count = sum(len(value) for value in calls) if all(isinstance(v, list) for v in calls) else None
+        from src.accounting_trace import atom, calc, constant
+        calculations = {}
         def total(name):
             values = []
-            for interaction in interactions:
+            for index, interaction in enumerate(interactions):
                 response = interaction.get("response")
                 usage = response.get("usage") if isinstance(response, dict) else None
                 value = usage.get(name) if isinstance(usage, dict) else None
-                values.append(value)
-            return (sum(values) if len(interactions) == len(steps)
-                    and all(type(v) is int and v >= 0 for v in values) else None)
+                values.append(atom(value if type(value) is int and value >= 0 else None, str(directory / 'trajectory.json'),
+                                   f'/llm_interactions/{index}/response/usage/' + name, description='原生最终摘要的逐响应字段'))
+            node = calc('guard', calc('sum', *values), constant(len(interactions) == len(steps),
+                'agents/trae/adapter.py:read_final_summary_case', '原生步骤与响应一一对应'))
+            calculations[name.removesuffix('_tokens')] = node
+            return node['value']
         summary = FinalSummary(bool(trajectory.get("end_time")), count,
                                total("input_tokens"), total("output_tokens"),
-                               "trae-native-summary-v2: trajectory.json final steps and interactions")
+                               str(directory / "trajectory.json") + ":final steps and interactions", calculations)
         return OriginalCase(case_id, None, None, summary)
 
     def validate_session_options(self, options):
@@ -181,11 +189,12 @@ class Trae:
                     (host / name).write_text(source.read_text(), encoding="utf-8")
                 argv = [options["python_executable"], str(target / "session_runner.py"), str(target), workspace.root]
             # Native config resolves OPENAI_API_KEY. Never write its value to artifacts or argv.
-            provider_env = "ANTHROPIC" if options["model_provider"] == "anthropic" else "OPENAI"
+            provider_env = {"anthropic": "ANTHROPIC", "google": "GOOGLE"}.get(options["model_provider"], "OPENAI")
             script = (f'export {provider_env}_API_KEY="${{{key}:?model API key is required}}"; '
                       f'export {provider_env}_BASE_URL={join([endpoint])}; '
                       f'export TOKENANA_PROTOCOL={quote(options["model_protocol"])} '
-                      f'TOKENANA_PROVIDER={quote(options["model_provider"])}; exec ' + join(argv))
+                      f'TOKENANA_PROVIDER={quote(options["model_provider"])} '
+                      f'TOKENANA_EVIDENCE_DIR={quote(str(target))}; exec ' + join(argv))
             try:
                 from src.process_logs import run_logged
                 process = run_logged(workspace.launch_command(["bash", "-c", script]), host,
@@ -237,10 +246,12 @@ def _config(options, endpoint, lakeview_endpoint=None):
     model = {"model_provider": "selected", "model": options["model"],
              "max_tokens": 4096, "temperature": 0.5, "top_p": 1, "top_k": 0,
              "max_retries": 10, "parallel_tool_calls": True}
+    model.update(options.get('generation_parameters', {}))
+    provider = options['model_provider'] if options['model_provider'] in ('anthropic', 'google') else 'openai'
     return {
-        "model_providers": {"selected": {"provider": "anthropic" if options["model_provider"] == "anthropic" else "openai",
+        "model_providers": {"selected": {"provider": provider,
                                            "api_key": "", "base_url": endpoint},
-                            "selected_lakeview": {"provider": "anthropic" if options["model_provider"] == "anthropic" else "openai",
+                            "selected_lakeview": {"provider": provider,
                                                   "api_key": "", "base_url": lakeview_endpoint or endpoint}},
         # Lakeview mutates temperature; keep separate native ModelConfig instances.
         "models": {"selected": dict(model), "lakeview": {**model, "model_provider": "selected_lakeview"}},

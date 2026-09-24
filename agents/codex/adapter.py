@@ -8,7 +8,7 @@ from typing import Any, Mapping
 
 from src.interfaces import AgentResult, ArtifactDirectory, Workspace
 from src.components import ConfigError
-from src.raw_usage import read_case_usage, read_case_usage_views
+from src.raw_usage import read_case_usage
 from src.models import ModelConfig
 from src.patches import patch_capture_command
 from src.workspaces import execution_timeout
@@ -59,7 +59,6 @@ class WorkspaceCaller(AgentCaller):
 
 class Codex:
     read_case_usage = staticmethod(read_case_usage)
-    read_case_usage_views = staticmethod(read_case_usage_views)
 
     model_protocols = ("responses", "chat_completions")
     raw_usage_protocols = model_protocols
@@ -106,9 +105,12 @@ class Codex:
         trace = None
         if trace_path.exists():
             trace = []
-            for line in trace_path.read_text(encoding="utf-8").splitlines():
+            for line_number, line in enumerate(trace_path.read_text(encoding="utf-8").splitlines(), 1):
                 try:
-                    trace.append(json.loads(line))
+                    event = json.loads(line)
+                    if isinstance(event, dict):
+                        event["_source"] = {"source": str(trace_path), "locator": f"line:{line_number}"}
+                    trace.append(event)
                 except ValueError:
                     pass  # Original analysis ignores malformed JSONL records.
         patch = patch_path.read_text(encoding="utf-8") if patch_path.exists() else None

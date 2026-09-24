@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from .accounting import OriginalCase
+from .accounting_trace import atom, calc, constant, missing, expression
 from .components import Component, load_component
 from .loading import load_adapter
 from .run_accounting import _artifact_directories, _original_report, original_supported
@@ -80,9 +81,13 @@ def normalized_native(artifacts, api_usage, original):
     expected = sum(e.get('type') == 'turn.completed' for e in original.trace or [])
     complete = (bool(ids) and len(observations) == len(ids) == expected
                 and {o.observation_id.rsplit('/', 1)[-1] for o in observations} == ids)
-    return {'metrics': {name: sum(o.metrics[name] for o in observations) if complete and
-              all(o.metrics.get(name) is not None and not o.issues.get(name) for o in observations) else None
-              for name in ('input', 'output', 'total', 'cache_read', 'cache_write', 'reasoning')},
+    calculations = {name: calc('guard', calc('sum', *(o.calculation.get(name) or
+        atom(o.metrics.get(name), o.source, '/normalized/' + name) for o in observations)),
+        constant(complete and all(o.metrics.get(name) is not None and not o.issues.get(name) for o in observations),
+                 'src/research_evidence.py:normalized_native', '原响应 ID 与 HTTP 完整一一对应，且指标无冲突'))
+        for name in ('input', 'output', 'total', 'ordinary_input', 'cache_read', 'cache_write', 'reasoning')}
+    return {'metrics': {name: node['value'] for name, node in calculations.items()}, 'calculation': calculations,
+            'identities': [[o.attempt_id, o.call_id, o.observation_id] for o in observations],
             'sources': [o.source for o in observations],
             'reason': None if complete else 'No complete one-to-one native-response-ID to HTTP-usage mapping; normalization cannot be isolated.'}
 
@@ -94,28 +99,32 @@ def policy_bridge(details, original, corrected, method):
     for metric, final in corrected['metrics'].items():
         old = original.get('metrics', {}).get(metric, {})
         count = original.get('cases_counted')
-        def summary(name, value, denominator, reason=None, native_rounding=True):
-            mean = (value // denominator if method in ('run_free', 'run_free_multilingual') and native_rounding else
-                    value / denominator) if value is not None and denominator else None
+        def summary(name, node, denominator, reason=None, native_rounding=True):
+            mean = calc('floor_divide' if method in ('run_free', 'run_free_multilingual') and native_rounding else 'divide',
+                node, constant(denominator, 'src/research_evidence.py:policy_bridge', '当前阶段的任务分母'))
             if method == 'turn_control' and native_rounding:
-                mean = None
-            return dict(stage=name, metric=metric, sum=value, denominator=denominator, mean=mean,
-                        complete=value is not None, reason=reason)
+                mean = missing('原 turn_control 未定义均值')
+            return dict(stage=name, metric=metric, sum=node['value'], denominator=denominator, mean=mean['value'],
+                        complete=node['value'] is not None, reason=reason, calculation={'sum': node, 'mean': mean})
         def native_sum(items):
-            values = [d.get('normalized_native', {}).get('metrics', {}).get(metric) for d in items]
-            return sum(values) if all(v is not None for v in values) else None
-        rows = [summary('original', old.get('sum') if old.get('complete') else None, count),
+            return calc('sum', *(d.get('normalized_native', {}).get('calculation', {}).get(metric) or
+                missing('无法隔离同一原生响应的字段规范化') for d in items), description='当前纳入任务的同调用规范化结果相加')
+        original_node = expression(old) if old.get('complete') else missing('原指标证据不完整')
+        rows = [summary('original', original_node, count),
                 summary('field_normalization', native_sum(selected), count,
                         'Requires one-to-one native response mapping; includes cache/reasoning normalization.'),
                 summary('task_selection', native_sum(details), len(details),
                         'All selected tasks, retaining the native call scope; missing native evidence remains unknown.'),
-                summary('call_coverage', final.get('sum'), len(details),
+                summary('call_coverage', expression(final), len(details),
                         'All forwarded main/agent auxiliary/method auxiliary attempts, with response deduplication.'),
-                summary('aggregation', final.get('sum'), len(details), native_rounding=False)]
+                summary('aggregation', expression(final), len(details), native_rounding=False)]
         rows[0]['mean'] = old.get('mean')
+        rows[0]['calculation']['mean'] = expression(old, 'mean')
         for index, row in enumerate(rows):
-            previous = rows[index - 1]['sum'] if index else None
-            row['delta_from_previous'] = row['sum'] - previous if row['sum'] is not None and previous is not None else None
+            previous = rows[index - 1]['calculation']['sum'] if index else missing('第一个阶段没有前一阶段')
+            delta = calc('subtract', row['calculation']['sum'], previous, description='相邻口径阶段差额；有交互，不代表因果')
+            row['delta_from_previous'] = delta['value']
+            row['calculation']['delta_from_previous'] = delta
             row['included_tasks'] = [d['case_id'] for d in (selected if index < 2 else details)]
             row['note'] = 'Ordered, interacting policy changes; unknown bridges are not zero effects or causal attribution.'
         stages.extend(rows)

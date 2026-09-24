@@ -10,7 +10,7 @@ import time
 from typing import Any, Mapping
 
 from src.components import ConfigError
-from src.raw_usage import read_case_usage, read_case_usage_views
+from src.raw_usage import read_case_usage
 from src.interfaces import AgentResult, Workspace
 from src.models import ModelConfig
 from src.agent_artifacts import collect_agent_patch, check_session_outcome, save_patch_eligibility
@@ -27,7 +27,6 @@ _MODEL_PREFIX = {
 
 class MiniSweAgent:
     read_case_usage = staticmethod(read_case_usage)
-    read_case_usage_views = staticmethod(read_case_usage_views)
 
     capabilities = ("turn_control",)
     session_capabilities = ("events", "replace_history", "state", "reminder", "terminate")
@@ -65,6 +64,7 @@ class MiniSweAgent:
 
     def read_original_case(self, directory, case_id):
         from src.accounting import OriginalCase
+        from src.accounting_trace import atom
 
         path = _original_trajectory(directory)
         if not path.exists() and (directory / "session-channel").exists():
@@ -75,7 +75,7 @@ class MiniSweAgent:
             if error:
                 raise ValueError(error)
             trace = []
-            for message in trajectory["messages"]:
+            for message_index, message in enumerate(trajectory["messages"]):
                 response = message.get("extra", {}).get("response")
                 usage = response.get("usage") if isinstance(response, dict) else None
                 if not isinstance(usage, dict):
@@ -88,7 +88,12 @@ class MiniSweAgent:
                 if _integer(incoming) is None or _integer(outgoing) is None:
                     raise ValueError("mini trajectory contains invalid original token counts")
                 trace.append({"type": "turn.completed", "usage": {
-                    "input_tokens": incoming, "output_tokens": outgoing}})
+                    "input_tokens": incoming, "output_tokens": outgoing},
+                    "_calculation": {name: atom(value, str(path),
+                        f'/messages/{message_index}/' + ('extra/response/usage/' if isinstance(response, dict) and isinstance(response.get('usage'), dict) else 'usage/') + field,
+                        kind='native_aggregate' if field in usage else 'rule_default', description='原生 usage 或作者默认零')
+                        for name, value, field in (("input_tokens", incoming, "input_tokens" if "input_tokens" in usage else "prompt_tokens"),
+                                                   ("output_tokens", outgoing, "output_tokens" if "output_tokens" in usage else "completion_tokens"))}})
         patch = directory / "patch.diff"
         return OriginalCase(case_id, trace, patch.read_text(encoding="utf-8") if patch.exists() else None)
 
@@ -99,7 +104,7 @@ class MiniSweAgent:
         trajectory, error = _read_trajectory(_original_trajectory(directory))
         if error:
             raise ValueError(error)
-        return OriginalCase(case_id, None, None, final_summary(trajectory))
+        return OriginalCase(case_id, None, None, final_summary(trajectory, str(_original_trajectory(directory))))
 
     def configure_model(self, model: ModelConfig, options: Mapping[str, Any]) -> dict:
         if model.protocol not in self.model_protocols:

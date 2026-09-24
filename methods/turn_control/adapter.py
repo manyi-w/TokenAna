@@ -37,6 +37,7 @@ class TurnControl:
             raise ValueError("final-summary accounting requires one selected attempt per case")
         selected = [case.final_summary for case in cases if case.final_summary is not None
                     and case.final_summary.finished and case.final_summary.function_calls is not None]
+        from src.accounting_trace import atom, calc, metric
         metrics = {}
         for key in ("input", "output", "total"):
             values = []
@@ -45,13 +46,14 @@ class TurnControl:
                 if any(value is not None and (type(value) is not int or value < 0)
                        for value in (incoming, outgoing, summary.function_calls)):
                     raise ValueError("invalid native final summary counts")
-                values.append(incoming if key == "input" else outgoing if key == "output" else
-                              incoming + outgoing if incoming is not None and outgoing is not None else None)
-            known = [value for value in values if value is not None]
+                a = summary.calculation.get('input') or atom(incoming, summary.source, 'input_tokens', description='原最终摘要输入')
+                b = summary.calculation.get('output') or atom(outgoing, summary.source, 'output_tokens', description='原最终摘要输出')
+                values.append(a if key == 'input' else b if key == 'output' else calc('sum', a, b))
+            known = [value for value in values if value['value'] is not None]
             complete = len(known) == len(values)
-            metrics[key] = {"sum": sum(known) if known or not selected else None,
-                            "mean": None, "complete": complete,
-                            "reasons": [] if complete else ["native final summary has missing token usage"]}
+            total = calc('sum', *known, description='原最终摘要累加') if known or not selected else atom(None, 'src/accounting_trace.py', 'missing', kind='missing')
+            metrics[key] = metric(total, complete=complete, mean_defined=False,
+                reasons=[] if complete else ['native final summary has missing token usage'])
         return {"rule": "turn-control-final-summary-compatible-v1", "cases_counted": len(selected),
                 "metrics": metrics,
                 "note": "Latest final native summary with function-call count, no patch/success filter. "

@@ -21,7 +21,7 @@ def _read(path):
 
 
 def _policy(report, policy):
-    return report.get(policy + "_token_accounting", {})
+    return report.get("original_token_accounting" if policy == "original" else "corrected_v2_api", {})
 
 
 def _identity(report):
@@ -41,7 +41,7 @@ def _dual_rows(report, metrics=()):
         for policy, accounting in policies.items():
             metric = accounting.get("metrics", {}).get(name, {})
             row.update({f"{policy}_{key}": metric.get(key)
-                        for key in ("sum", "mean", "complete")})
+                        for key in ("sum", "known_subtotal", "mean", "complete")})
             row[f"{policy}_reasons"] = metric.get("reasons", ["not accounted"])
             row[f"{policy}_cases_counted"] = accounting.get("cases_counted")
         row["policy_difference"] = (
@@ -54,6 +54,9 @@ def _dual_rows(report, metrics=()):
 
 def export_accounting(report, output):
     """Write the same exports for run/resume and independently versioned analyses."""
+    from .accounting_explain import explain_run
+    from .accounting_trace import export_trace
+    export_trace(explain_run(report), output)
     summary = _dual_rows(report)
     cases = [{**{key: case.get(key) for key in ("case_id", "repo", "base_commit", "stage", "resolved", "control", "prompt_metadata", "native_final_summary")}, **row}
              for case in report["cases"] for row in _dual_rows(case)]
@@ -75,7 +78,7 @@ def export_accounting(report, output):
     evaluation_fields = ["selected", "known_outcomes", "resolved", "resolved_over_selected", "resolved_over_completed", "complete"]
     _csv(output / "evaluation.csv", [evaluation], evaluation_fields)
     from .cost_reporting import export_cost, cost_markdown
-    export_cost(report.get('cost_accounting'), output, _identity(report))
+    export_cost(report.get('corrected_v2_cost'), output, _identity(report))
     _text(output / "accounting.md", "# Token accounting\n\n"
           + "Generation status: " + report["run_status"] + ".\n\n"
           + _markdown([_identity(report)], ["dataset", "method", "agent", "model"]) + "\n\n"
@@ -87,7 +90,7 @@ def export_accounting(report, output):
           + "\n\n" + _markdown(overhead, overhead_fields)
           + "\n\n## Evaluation\n\nMissing outcomes remain unknown; ratios use the stated denominators.\n\n"
           + _markdown([evaluation], evaluation_fields)
-          + '\n\n## Cost (USD)\n\n' + cost_markdown(report.get('cost_accounting'))
+          + '\n\n## Cost (USD)\n\n' + cost_markdown(report.get('corrected_v2_cost'))
           + '\n\n[Requests](requests.csv) · [Cost components](costs.csv)\n'
           + "\n\n[Case metrics](cases.csv) · [Raw usage references and configuration](accounting.json)\n")
 
@@ -124,7 +127,7 @@ def analyze_run(run, output=None, *, pricing=None):
                 for metric in group.get("metrics", {}).values():
                     metric["complete"] = False
                     metric["reasons"].append("run is marked running; artifact snapshot may be changing")
-    report["analysis"] = {"version": "analysis-v1", "created_at": datetime.now(timezone.utc).isoformat(),
+    report["analysis"] = {"version": "analysis-v2", "created_at": datetime.now(timezone.utc).isoformat(),
                           "note": "Recomputed from saved artifacts using the currently installed adapters."}
     target = (Path(output) if output is not None else
               run / "analysis" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")).resolve()
@@ -138,7 +141,7 @@ def _load_report(path):
     path = Path(path).resolve()
     path = path / "accounting.json" if path.is_dir() else path
     report = _read(path)
-    if (not isinstance(report, dict) or report.get("schema_version") != 1 or
+    if (not isinstance(report, dict) or report.get("schema_version") != 2 or
             not isinstance(report.get("cases"), list)):
         raise ValueError(f"{path}: unsupported accounting report")
     if (path.parent / "state.json").is_file():
@@ -149,6 +152,8 @@ def _load_report(path):
         latest = state.get("evaluation", {}).get("report_summary")
         if latest and _read(Path(latest)) != report.get("evaluation"):
             raise ValueError(f"{path}: evaluation changed; use analyze to refresh the report")
+    if not report.get("corrected_v2_api"):
+        raise ValueError("Only corrected-v2-api reports are supported; rebuild from raw evidence with analyze")
     if "experiment" not in report:
         report["experiment"] = _read(path.parent / "config.json")
     return report, str(path)
@@ -235,13 +240,15 @@ def compare_runs(paths, output):
     overhead_cases = [{"run_index": index, "case_id": case["case_id"], **row}
                       for index, report in enumerate(reports) for case in report["cases"]
                       for row in overhead_rows(case.get("overhead"))]
-    result = {"schema_version": 1, "baseline_index": 0, "inputs": inputs,
+    result = {"schema_version": 2, "baseline_index": 0, "inputs": inputs,
               'cost_comparison': costs,
               "overhead": overhead, "overhead_cases": overhead_cases,
               "summary": summary, "cases": cases,
               "note": "Changes compare the same policy against run 0. No evaluation success is inferred."}
     target = Path(output).resolve()
     target.mkdir(parents=True, exist_ok=False)
+    from .accounting_trace import export_trace_bundle
+    export_trace_bundle(((str(i), r['accounting_trace']) for i, r in enumerate(reports) if r.get('accounting_trace')), target)
     write_json(target / "comparison.json", result)
     _csv(target / "summary.csv", summary, list(summary[0]))
     _csv(target / 'costs.csv', costs, list(costs[0]))

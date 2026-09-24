@@ -54,7 +54,7 @@ def read_services(directory, *, case_id, attempt_id, call_id, local_compute=None
     for path in sorted(Path(directory).glob('*.json')):
         data, attr = {}, {}
         metrics = dict.fromkeys(METRICS)
-        local = []
+        local, calculation = [], {}
         try:
             data = json.loads(path.read_text())
             if local_compute is not None and isinstance(data, dict) and (
@@ -69,7 +69,8 @@ def read_services(directory, *, case_id, attempt_id, call_id, local_compute=None
             if data.get('raw_usage') is not None:
                 if not data['inference']:
                     raise ValueError('orchestration record cannot own inference usage')
-                metrics = normalize_usage(data['raw_usage'], data['protocol'], data.get('provider'))
+                metrics = normalize_usage(data['raw_usage'], data['protocol'], data.get('provider'),
+                    calculation=calculation, source=str(path), locators={k: '/raw_usage/' + k for k in data['raw_usage']})
             elif data['inference']:
                 local.append('service inference usage unknown')
             if not data.get('complete'):
@@ -85,7 +86,7 @@ def read_services(directory, *, case_id, attempt_id, call_id, local_compute=None
         context = {key: data.get(key) for key in ('provider', 'protocol')}
         if data.get('inference', True):
             observations.append(UsageObservation(case_id, attempt_id, call_id, path.stem,
-                metrics, str(path), data.get('raw_usage') or {}, {}, purpose, model, parent, path.stem, context))
+                metrics, str(path), data.get('raw_usage') or {}, {}, purpose, model, parent, path.stem, context, calculation))
         operations.append(UsageOperation(case_id, attempt_id, call_id, path.stem,
             purpose, model, parent, 'service', duration(data), bool(data.get('complete')), local,
             data.get('inference', True), context))
