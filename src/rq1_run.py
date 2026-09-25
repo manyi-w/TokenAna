@@ -1,6 +1,5 @@
 """Four RQ1 launchers, using the shared executor and official evaluator."""
 import argparse
-from dataclasses import asdict
 from datetime import datetime, timezone
 import importlib.util
 import json
@@ -94,37 +93,23 @@ def prepare(method, settings_path):
         if name and not os.environ.get(name):
             errors.append('Missing credential environment variable: ' + name)
     images = dict(settings.get('images', {}).get(method, {}))
+    from .rq1_images import DEFAULT_VERIFIER, image_reference
+    settings['verifier_image'] = settings.get('verifier_image') or DEFAULT_VERIFIER
+    try:
+        for value in [settings['verifier_image'], *(v for v in images.values() if v)]:
+            image_reference(value)
+    except ValueError as error:
+        errors.append(str(error))
     if shutil.which('docker'):
-        inventory = subprocess.run(['docker', 'images', '--format', '{{.Repository}}:{{.Tag}}'], capture_output=True, text=True, timeout=20)
-        if inventory.returncode:
-            errors.append('Docker image inventory unavailable')
-        else:
-            for case in ids:
-                if case not in images:
-                    matches = ([i for i in inventory.stdout.splitlines() if case.split('__')[1] in i and i.endswith('-agent:latest')]
-                               if method == 'run_free' else
-                               ['swebench/sweb.eval.x86_64.' + case.replace('__', '_1776_').lower() + ':latest'])
-                    if len(matches) == 1:
-                        images[case] = matches[0]
-            # Freeze immutable image IDs, not moving tags.
-            for tag in sorted(set(images.values()) | {settings.get('verifier_image', '')}):
-                if not tag:
-                    continue
-                info = subprocess.run(['docker', 'image', 'inspect', '--format', '{{.Id}}', tag], capture_output=True, text=True)
-                if info.returncode:
-                    errors.append('Prepared image unavailable: ' + tag)
-                else:
-                    for case in ids:
-                        if images.get(case) == tag:
-                            images[case] = info.stdout.strip()
-                    if settings.get('verifier_image') == tag:
-                        settings['verifier_image'] = info.stdout.strip()
+        try:
+            info = subprocess.run(['docker', 'info', '--format', '{{.OSType}}'],
+                                  capture_output=True, text=True, timeout=20)
+            if info.returncode or info.stdout.strip() != 'linux':
+                errors.append('Local Linux Docker daemon unavailable')
+        except subprocess.TimeoutExpired:
+            errors.append('Docker daemon check timed out')
     else:
         errors.append('Docker CLI unavailable')
-    if set(ids) - images.keys():
-        errors.append(f'Missing prepared image selection for {len(set(ids) - images.keys())} tasks')
-    if not settings.get('verifier_image'):
-        errors.append('verifier_image is required')
     if method in ('agent_diet', 'attn_compress'):
         modules = ['openai', 'docker', 'pexpect', 'tiktoken', 'lz4'] + (['google.genai', 'httpx'] if method == 'attn_compress' else [])
         for module in modules:
@@ -233,12 +218,13 @@ def main():
         config, runtime, pricing = restore(run, args.method)
     else:
         if not args.settings.is_file():
-            parser.exit(2, 'Prepare RQ1/settings.toml from settings.example.toml (or use --settings); no experiment started.\n')
+            parser.exit(2, 'Configure RQ1/settings.toml (or use --settings); no experiment started.\n')
         config, runtime, pricing, errors = prepare(args.method, args.settings.resolve())
         if errors:
             parser.exit(2, '\n'.join('NOT READY: ' + e for e in errors) + '\nNo experiment started.\n')
         if args.check:
-            print('Local preparation passed. Model access, image runtime and formal execution remain unverified.')
+            print('Local prerequisites passed. --run will pull/build missing task images and the official evaluator. '
+                  'Image runtime, model access and formal execution remain unverified.')
             return
         run = ROOT / 'RQ1/runs' / args.method / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     from .execution import run_experiment
@@ -250,11 +236,21 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             parser.exit(2, 'This RQ1 run is already active.\n')
-        verify_images(config, runtime)
+        preparation = None
         try:
+            if not args.resume:
+                from .rq1_images import prepare_images
+                # The shared executor creates the run directory itself. Keep
+                # preparation failures/logs separately, then retain them with
+                # the run as soon as the executor has initialized it.
+                preparation = run.parent / '.preparation' / run.name
+                runtime = prepare_images(preparation, config, runtime)
+            verify_images(config, runtime)
             run_experiment(config, runtime, run, resume=bool(args.resume), pricing=pricing)
             evaluate(run, 'local', execute=True)
         finally:
+            if preparation and preparation.exists() and run.exists():
+                shutil.move(str(preparation), str(run / 'image-preparation'))
             if (run / 'state.json').exists():
                 report_run(run, args.method)
     print('RQ1 report: ' + str(run / 'rq1-report/summary.md'))

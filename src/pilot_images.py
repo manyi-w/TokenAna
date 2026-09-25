@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 import subprocess
+import time
 
 from .records import write_json
 from .telemetry import span
@@ -20,7 +21,6 @@ def build(output, name, dockerfile, *, includes=(), context=ROOT):
     directory.mkdir(exist_ok=True)
     safe = name.replace('/', '_').replace(':', '_')
     path = directory / (safe + '.Dockerfile')
-    print(f'BUILD: {name}; log: {directory / (safe + ".log")}', flush=True)
     path.write_text(dockerfile)
     # Dockerfile-specific ignore overrides root .dockerignore. No configuration,
     # credentials, histories or output directories enter an image build context.
@@ -32,11 +32,45 @@ def build(output, name, dockerfile, *, includes=(), context=ROOT):
         ignore += ['!' + item, '!' + item + '/**']
     ignore += ['**/.git', '**/__pycache__', '**/node_modules', '**/target', '**/.DS_Store']
     Path(str(path) + '.dockerignore').write_text('\n'.join(ignore) + '\n')
-    with span(directory, 'image_build', image=name):
-        with (directory / (safe + '.log')).open('a') as log:
-            subprocess.run(['docker', 'build', '--platform', 'linux/amd64', '--progress', 'plain',
-                            '-t', name, '-f', str(path), str(context)],
-                           stdout=log, stderr=subprocess.STDOUT, check=True)
+    image_command(output, name, ['docker', 'build', '--platform', 'linux/amd64', '--progress', 'plain',
+                               '-t', name, '-f', str(path), str(context)])
+
+
+def image_command(output, name, command, *, action='BUILD'):
+    """Record image preparation with shared progress and interruption handling."""
+    directory = output / 'build'
+    directory.mkdir(exist_ok=True)
+    safe = name.replace('/', '_').replace(':', '_')
+    log_path = directory / (safe + '.log')
+    print(f'{action}: {name}; log: {log_path}', flush=True)
+    with span(directory, 'image_' + action.lower(), image=name):
+        started = time.monotonic()
+        with log_path.open('a') as log:
+            attempt_start = log.tell()
+            with subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT) as process:
+                try:
+                    while True:
+                        try:
+                            code = process.wait(timeout=15)
+                            break
+                        except subprocess.TimeoutExpired:
+                            with log_path.open('rb') as stream:
+                                stream.seek(max(attempt_start, log_path.stat().st_size - 2048))
+                                lines = stream.read(2048).decode('utf-8', errors='replace').splitlines()
+                            latest = next((line for line in reversed(lines) if line.strip()), 'waiting for build output')
+                            print(f'{action} RUNNING: {name}; {time.monotonic() - started:.0f}s; {latest}', flush=True)
+                except BaseException:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                    raise
+            if code:
+                print(f'{action} FAILED: {name}; exit={code}; log: {log_path}', flush=True)
+                raise subprocess.CalledProcessError(code, command)
+        print(f'{action} DONE: {name}; {time.monotonic() - started:.0f}s', flush=True)
 
 
 def tools_image(agent):

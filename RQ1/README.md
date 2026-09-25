@@ -4,9 +4,10 @@
 
 ## 四个入口
 
-在仓库根目录，先复制 [环境设置模板](settings.example.toml) 为 `RQ1/settings.toml`，填写已准备好的镜像、端点与凭据环境变量名称。凭据值只放环境变量。脚本自动激活 Conda `tokenAna`，要求 Python 3.12.14；不安装依赖、不构建镜像、不自动降级模型。
+在仓库根目录，使用本地 `RQ1/settings.toml`，填写端点与凭据环境变量名称；任务镜像映射可以留空，运行时自动准备。当前四组主模型与 AgentDiet 辅助模型共用 `config/local/deepswe-pilot/settings.toml` 中 Claude/GPT 的第三方端点和密钥，保持下表冻结的模型 ID；密钥通过本地 `config/local/rq1/secrets.env` 加载为 `RQ1_API_KEY`，不写入 RQ1 配置快照。AttnCompress 的 `RQ1_GOOGLE_OFFICIAL_API_KEYS` 仅用于可选 Google 官方密钥，本设置留空，不把第三方密钥发往官方端点。脚本自动激活 Conda `tokenAna`，要求 Python 3.12.14；镜像内依赖由构建安装，不修改宿主依赖，不自动降级模型。
 
 ```bash
+source config/local/rq1/secrets.env
 bash RQ1/run_free/run.sh --run
 bash RQ1/turn_control/run.sh --run
 bash RQ1/attn_compress/run.sh --run
@@ -21,7 +22,11 @@ bash RQ1/turn_control/run.sh --resume RQ1/runs/turn_control/<run-id>
 bash RQ1/turn_control/run.sh --report RQ1/runs/turn_control/<run-id>
 ```
 
-`--check` 检查配置、任务、镜像清单、宿主依赖及压缩服务；不会发模型请求，也不代表镜像内执行已验收。`--run` 在首个模型请求前检查全部选中镜像中的客户端/工具及评测依赖。`--resume` 使用已保存配置、镜像 ID、价格和任务集合，恢复未完成的环境准备或评测；已开始生成的失败/中断任务不自动重新生成。`--report` 只重建已停止运行的报告。可用 `--settings <path>` 或 `RQ1_SETTINGS` 指定设置。
+`--check` 检查配置、固定任务、Docker 可用性、宿主依赖及压缩服务；不要求镜像提前存在，不下载或构建镜像，不发模型请求。`--run` 自动准备全部镜像，冻结镜像 ID，再检查镜像内客户端/工具及评测依赖，全部通过后才调用模型。`--resume` 使用已保存配置、镜像 ID、价格和任务集合，恢复未完成的任务准备或评测；不重建、替换已冻结镜像，已开始生成的失败/中断任务不自动重新生成。`--report` 只重建已停止运行的报告。可用 `--settings <path>` 或 `RQ1_SETTINGS` 指定设置。
+
+首次运行会拉取各题的 `swebench/sweb.eval.x86_64.*:latest` 基础镜像，并添加各组所需的客户端及工具 Python。默认 `tokenana-verified-evaluator:latest`（`verifier_image` 未填时也使用它）由项目内官方 SWE-bench 源码自动构建。`[images.<method>]` 可选逐题覆盖完整任务镜像；显式设置其他评测镜像时使用该镜像，本地缺失则拉取。所有任务镜像在生成前固定为不可变 ID；后续新运行复用 Docker 下载与构建缓存。
+
+下载及构建每 15 秒显示进度，完整日志和逐题镜像记录先写入 `RQ1/runs/<method>/.preparation/<run-id>/`。正式运行目录创建后，退出时归入该运行的 `image-preparation/`。若镜像阶段失败，没有模型调用，日志保留在原处；修复原因后重执行 `--run`，复用 Docker 缓存继续准备。已有正式运行使用 `--resume`。
 
 ## 冻结 setting
 
@@ -40,7 +45,7 @@ turn_control 历史归档实际响应标识是 `gemini-2.5-pro-preview-06-05`，
 
 ## 实验环境
 
-使用已准备好的 Linux Docker 环境、各题 base commit、原生客户端及工具 Python、官方 Verified harness 镜像。run_free 镜像还需原 nonroot 用户、testbed Conda 和配置脚本所需目录。turn_control 镜像需本项目支持的 Trae/Google SDK；AgentDiet/AttnCompress 宿主 `tokenAna` 需作者依赖（openai、docker、pexpect、tiktoken、lz4；AttnCompress 另需 google-genai、httpx）。具体检查见入口；不以当前开发机缺项限制正式硬件配置。
+使用 Linux Docker 环境，镜像准备阶段需要网络。自动构建保留各题基础环境与 base commit：run_free 添加 CLI 1.0.16、nonroot 权限及配置脚本所需目录，turn_control 添加本项目支持的 Trae/Google SDK，AgentDiet/AttnCompress 添加原工具使用的 Python 路径，评测镜像包含本地官方 harness。AgentDiet/AttnCompress 宿主 `tokenAna` 仍需作者依赖（openai、docker、pexpect、tiktoken、lz4；AttnCompress 另需 google-genai、httpx），GPU 压缩服务也须可用。具体检查见入口；不以当前开发机缺项限制正式硬件配置。
 
 AttnCompress 在准备好的 GPU 环境使用原压缩服务和独立 forward 观测：
 

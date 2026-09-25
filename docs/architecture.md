@@ -61,7 +61,9 @@ full 增加逐请求文件系统增量和完整容器归档。原始 HTTP、原�
 
 ## 当前状态
 
-RQ1 的四个 `run.sh` 通过 `src/rq1_run.py` 复用公共执行器、恢复、research 留存和官方评测。`src/rq1_native.py` / `src/rq1_expert.py` 负责原调用传输、配置与观测；run_free 保留原 Claude CLI 1.0.16 和提示/Git 约束，AgentDiet/AttnCompress 使用原 Expert，turn_control 使用已批准的现代 Trae 同会话控制器。原算法不修改，不另建执行引擎。Gemini 原生 generateContent 与 OpenAI 兼容协议分别记录 usage，缓存/reasoning 按字段包含关系规范化。
+RQ1 本地端点及凭据按用户约定复用现有 Claude/GPT 第三方服务，覆盖四组主模型及 AgentDiet 辅助模型；固定模型 ID 与协议不变。凭据通过本地环境文件加载，第三方密钥不用于 AttnCompress 的可选 Google 官方分支。配置解析已检查，真实服务兼容性及完整环境验收仍待完成。
+
+RQ1 的四个 `run.sh` 通过 `src/rq1_run.py` 复用公共执行器、恢复、research 留存和官方评测。`src/rq1_images.py` 复用公共构建与进度记录，自动拉取逐题 Verified 基础镜像、添加原生客户端/工具并构建官方评测镜像；全部完成后冻结镜像 ID 并检查运行时，才进入生成。显式镜像覆盖本地缺失时自动拉取；恢复沿用已冻结 ID，不重新构建替换。`--check` 只查配置及前置环境，不要求镜像已存在。`src/rq1_native.py` / `src/rq1_expert.py` 负责原调用传输、配置与观测；run_free 保留原 Claude CLI 1.0.16 和提示/Git 约束，AgentDiet/AttnCompress 使用原 Expert，turn_control 使用已批准的现代 Trae 同会话控制器。原算法不修改，不另建执行引擎。Gemini 原生 generateContent 与 OpenAI 兼容协议分别记录 usage，缓存/reasoning 按字段包含关系规范化。
 
 独立 [RQ1](../RQ1/README.md) 固定 run_free/Sonnet 4.5 前 100 题、turn_control/正式版 Gemini 2.5 Pro 原 100 题、AttnCompress/Gemini 3 Flash 及 AgentDiet/Gemini 2.5 Pro 各 200 题。turn_control 为 29→45，历史 preview 06-05 与新正式版分栏。`paper-values.toml` 保存论文印刷操作数，`src/rq1_report.py` 输出论文值、新 original、同轨迹完整 v2 和 cache_only；方法 historical reader 保留原筛选与计价规则，`replay.sh` 仅复算历史。历史 Gemini 确有缓存命中，但完整历史 API 覆盖仍不足；新入口已接线，四组真实组件与正式运行尚未验收。
 
